@@ -1,0 +1,447 @@
+---
+title: "SOC_229_EX_4"
+author: "Phoebe Jiang"
+date: "2025-04-28"
+output: html_document
+---
+
+## Task 1 Flexible Kernels Comparison
+
+### 0. Data Preparation
+
+```{r}
+# Load required packages
+library(kernelTools)
+library(caret)
+
+# Load and preprocess data
+data <- read.csv("C:/Users/saran/OneDrive/Documents/SOC 229/housing.csv")
+data <- na.omit(data)  # Remove missing values
+
+num_preds <- sapply(data, is.numeric)
+num_preds["median_house_value"] <- FALSE
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Train-test split (75-25)
+train_i   <- sample(nrow(data), 0.75*nrow(data))
+train_df  <- data[train_i, ]
+test_df   <- data[-train_i, ]
+
+# Standardize features (excluding target)
+preProc   <- preProcess(train_df[, num_preds], method=c("center","scale"))
+train_num <- predict(preProc, train_df[, num_preds])
+test_num  <- predict(preProc, test_df[, num_preds])
+
+# True response vectors
+y_train_vec <- train_df$median_house_value
+y_test_vec  <- test_df$median_house_value
+
+x_train_mat <- as.matrix(train_num)
+x_test_mat  <- as.matrix(test_num)
+
+# Wrap in lists of matrices for kernelTools
+x_list      <- list(x_train_mat)
+x_test_list <- list(x_test_mat)
+
+# Define common tuning grid & CV folds
+reg_params <- c(0.001, 0.01, 0.1, 1, 10)
+k_folds    <- 5
+
+# Subset 20% of the *training* data and tune there
+sub_frac  <- 0.20  
+
+# Sample row-indices from train_df
+set.seed(123)
+sub_idx   <- sample(nrow(train_df), size = floor(sub_frac * nrow(train_df)))
+
+# Build the subset x/y
+train_sub_num  <- train_num[sub_idx, ]        # scaled predictors
+x_sub_mat      <- as.matrix(train_sub_num)
+x_sub_list     <- list(x_sub_mat)
+y_sub_vec      <- y_train_vec[sub_idx]
+
+```
+### 1. Linear
+
+```{r lin_tune}
+# Tune linear kernel on smaller set
+linear_tune_sub <- kernWLSBW(
+  x         = x_sub_list,
+  y         = y_sub_vec,
+  kernel    = "linear",
+  reg.param = reg_params,
+  k         = k_folds,
+  reps      = 1
+)
+
+linear_tune_sub
+
+```
+
+```{r lin_evaluate}
+# ─────────────────────────────────────────────────────────────────────────────
+# Refit on the *full* training set with that λ
+# ─────────────────────────────────────────────────────────────────────────────
+linear_full <- kernWLS(
+  x         = x_list,
+  y         = y_train_vec,
+  kernel    = "linear",
+  reg.param = linear_tune_sub$best.regpar
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Predict on the held‐out test set & compute RMSE
+# ─────────────────────────────────────────────────────────────────────────────
+pred_full <- predict(linear_full, newx = x_test_list)
+rmse_full <- sqrt(mean((pred_full - y_test_vec)^2))
+
+cat("Test RMSE:", rmse_full, "\n")
+```
+
+### 2. RBF
+
+```{r}
+# 2. RBF Kernel ---------------------------------------------------
+rbf_tune <- kernWLSBW(x = x_sub_list, 
+                      y = y_sub_vec,
+                      kernel = "rbf",
+                      kern.param = c(0.1, 1, 10), 
+                      reg.param = reg_params,
+                      k = k_folds, reps = 1)
+rbf_tune
+```
+
+```{r}
+best_sigma  <- unname(rbf_tune$best.kernpar[1])   # 0.1
+best_lambda <-    rbf_tune$best.regpar           # 0.01
+
+cat("Best σ:     ", best_sigma,  "\n")
+cat("Best λ:     ", best_lambda, "\n")
+
+rbf_model <- kernWLS(
+                    x = x_list,
+                    y = y_train_vec, 
+                    kernel = "rbf",
+                    kern.param= best_sigma,    
+                    reg.param = best_lambda
+                    )
+
+rbf_pred <- predict(rbf_model, newx = x_test_list)
+rbf_rmse <- sqrt(mean((rbf_pred - y_test_vec)^2))
+
+cat("RBF RMSE:  ", rbf_rmse, "\n")
+
+```
+
+### 3. Rational Quadratic
+
+```{r}
+# 3. Rational Quadratic Kernel -------------------------------------
+ratquad_tune <- kernWLSBW(x = x_sub_list,
+                          y = y_sub_vec,
+                          kernel = "ratquad",
+                          kern.param = list(
+                            list(
+                              alpha = c(0.1, 1, 10),
+                              sigma = c(0.5, 1, 2)
+                              )
+                          ),
+                          reg.param = reg_params,
+                          k         = k_folds, 
+                          reps      = 1)
+ratquad_tune
+```
+
+```{r}
+best_alpha <- unname(ratquad_tune$best.kernpar[1]) 
+best_sigma <- unname(ratquad_tune$best.kernpar[2]) 
+best_lambda<- ratquad_tune$best.regpar   
+
+cat("Best α:    ", best_alpha,  "\n")
+cat("Best σ:    ", best_sigma,  "\n")
+cat("Best λ:    ", best_lambda, "\n")
+
+# Refit on the FULL training set with those hyperparameters
+ratquad_model <- kernWLS(
+  x          = x_list,
+  y          = y_train_vec,
+  kernel     = "ratquad",
+  kern.param = c(best_alpha, best_sigma), 
+  reg.param  = best_lambda
+)
+
+# Predict on the held-out test set & compute RMSE
+ratquad_pred <- predict(ratquad_model, newx = x_test_list)
+ratquad_rmse <- sqrt(mean((ratquad_pred - y_test_vec)^2))
+
+cat("Rational-Quadratic RMSE:", ratquad_rmse, "\n")
+
+```
+
+### 4. Arc-Cosine 
+
+```{r}
+
+# 4. Arc-Cosine Kernel --------------------------------------------
+arccos_tune_sub <- kernWLSBW(x = x_sub_list, 
+                         y = y_sub_vec,
+                         kernel = "arccos",
+                         kern.param = list(order = c(0, 1, 2)),  
+                         reg.param = reg_params,
+                         k = k_folds, reps = 1)
+arccos_tune_sub
+
+best_order  <-    unname(arccos_tune_sub$best.kernpar[1])
+best_lambda <-    arccos_tune_sub$best.regpar
+
+cat("Best order:",  best_order,  "\n")
+cat("Best λ:    ",  best_lambda, "\n")
+
+arccos_model <- kernWLS(x = x_list,
+                        y = y_train_vec, 
+                       kernel = "arccos",
+                       kern.param = best_order, 
+                       reg.param = best_lambda)
+
+arccos_pred <- predict(arccos_model, newx = x_test_list)
+arccos_rmse <- sqrt(mean((arccos_pred - y_test_vec)^2))
+
+cat("Arc-Cosine RMSE:", arccos_rmse, "\n")
+```
+
+### 5. Neural Network
+
+```{r nnet}
+
+# 5. Neural Network Kernel ----------------------------------------
+nnet_tune <- kernWLSBW(x          = x_sub_list, 
+                       y          = y_sub_vec,
+                       kernel     = "nnet",
+                       kern.param = list(scale = c(0.1, 1, 10)), 
+                       reg.param  = reg_params,
+                       k          = k_folds, 
+                       reps       = 1)
+nnet_tune
+
+best_scale  <- unname(nnet_tune$best.kernpar[1])
+best_lambda <-    nnet_tune$best.regpar
+
+cat("Best scale:", best_scale, "\n")
+cat("Best λ:    ", best_lambda, "\n")
+
+nnet_model <- kernWLS(x = x_list,
+                      y = y_train_vec, 
+                     kernel = "nnet",
+                     kern.param = best_scale,
+                     reg.param = best_lambda)
+
+nnet_pred <- predict(nnet_model, newx = x_test_list)
+nnet_rmse <- sqrt(mean((nnet_pred - y_test_vec)^2))
+
+cat("NN-Kernel RMSE:", nnet_rmse, "\n")
+
+```
+
+### 6. Compare results
+
+```{r}
+
+# Compare results -------------------------------------------------
+best_lambda_lin <- linear_tune_sub$best.regpar
+best_lambda_rbf <- rbf_tune$best.regpar
+best_lambda_rq  <- ratquad_tune$best.regpar
+best_lambda_ac  <- arccos_tune_sub$best.regpar
+best_lambda_nn  <- nnet_tune$best.regpar
+best_sigma_rq   <- unname(ratquad_tune$best.kernpar[2]) 
+
+results <- data.frame(
+  Model = c("Linear", "RBF", "Rational Quadratic", "Arc-Cosine", "Neural Net"),
+  RMSE = round(c(rmse_full, rbf_rmse, ratquad_rmse, arccos_rmse, nnet_rmse), 4),
+  Best_Params = c(
+    "—",
+    paste0("σ=", best_sigma),
+    paste0("α=", best_alpha, ",σ=", best_sigma_rq),
+    paste0("order=", best_order),
+    paste0("scale=", best_scale)
+  ),
+  Lambda      = c(
+    best_lambda_lin,
+    best_lambda_rbf,
+    best_lambda_rq,
+    best_lambda_ac,
+    best_lambda_nn
+  )
+)
+
+print(results[order(results$RMSE), ])
+```
+
+## Task 2. Extrapolation with Flexible Kernels
+
+```{r}
+
+# 1. find the 25th percentile of median_income
+p25   <- quantile(data$median_income, 0.25)
+
+# 2. hold out all rows at or below that value
+hold  <- which(data$median_income <= p25)
+train2 <- data[-hold, ]
+test2  <- data[ hold, ]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Scale the single predictor
+# ─────────────────────────────────────────────────────────────────────────────
+m2    <- mean(train2$median_income)
+s2    <- sd(  train2$median_income)
+
+# scaled predictor values
+x_tr2 <- (train2$median_income - m2) / s2
+x_te2 <- (test2$ median_income - m2) / s2
+
+# responses
+y_tr2 <- train2$median_house_value
+y_te2 <- test2$ median_house_value
+
+# wrap in list‐of‐matrix for kernelTools
+x_tr2_list <- list(matrix(x_tr2, ncol=1))
+x_te2_list <- list(matrix(x_te2, ncol=1))
+
+# tuning grid & CV folds
+reg_params <- c(0.01,0.1)
+k_folds    <- 3
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. RBF on one‐dimensional data
+# ─────────────────────────────────────────────────────────────────────────────
+rbf_tune_1d <- kernWLSBW(
+  x          = x_tr2_list,
+  y          = y_tr2,
+  kernel     = "rbf",
+  kern.param = list(sigma = c(0.1, 1)),
+  reg.param  = reg_params,
+  k          = k_folds,
+  reps       = 1
+)
+best_sigma_1d <- unname(rbf_tune_1d$best.kernpar[1])
+best_lambda_rbf1d <- rbf_tune_1d$best.regpar
+
+rbf_mod_1d <- kernWLS(
+  x         = x_tr2_list,
+  y         = y_tr2,
+  kernel    = "rbf",
+  kern.param= best_sigma_1d,
+  reg.param = best_lambda_rbf1d
+)
+rbf_pred2 <- predict(rbf_mod_1d, newx = x_te2_list)
+rbf_rmse2 <- sqrt(mean((rbf_pred2 - y_te2)^2))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Neural‐Net Kernel on 1D
+# ─────────────────────────────────────────────────────────────────────────────
+nn_tune_1d <- kernWLSBW(
+  x          = x_tr2_list,
+  y          = y_tr2,
+  kernel     = "nnet",
+  kern.param = list(scale = c(0.1,1)),
+  reg.param  = reg_params,
+  k          = k_folds,
+  reps       = 1
+)
+best_scale1d   <- unname(nn_tune_1d$best.kernpar[1])
+best_lambda_nn1d <- nn_tune_1d$best.regpar
+
+nn_mod_1d <- kernWLS(
+  x         = x_tr2_list,
+  y         = y_tr2,
+  kernel    = "nnet",
+  kern.param= best_scale1d,
+  reg.param = best_lambda_nn1d
+)
+nn_pred2   <- predict(nn_mod_1d, newx = x_te2_list)
+nn_rmse2   <- sqrt(mean((nn_pred2 - y_te2)^2))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Summarize & compare
+# ─────────────────────────────────────────────────────────────────────────────
+results_1d <- data.frame(
+  Model = c("RBF-1D", "NNet-1D"),
+  RMSE  = c(rbf_rmse2, nn_rmse2),
+  Params= c(
+    paste0("σ=", best_sigma_1d),
+    paste0("scale=", best_scale1d)
+  ),
+  Lambda= c(best_lambda_rbf1d, 
+            best_lambda_nn1d)
+)
+
+print(results_1d)
+
+```
+
+
+## Task 3. Composite Kernel (Linear + RBF)
+
+```{r}
+# ─────────────────────────────────────────────────────────────────────────────
+# FAST Composite Tuning (Linear + RBF) — No Nyström
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 1. Subsample 30% of the 75% “remainder” training set
+set.seed(123)
+sub_frac       <- 0.3
+sub_idx        <- sample(length(y_tr2), floor(sub_frac * length(y_tr2)))
+x_sub_mat      <- x_tr2_list[[1]][sub_idx,,drop=FALSE]
+y_sub_vec      <- y_tr2[sub_idx]
+x_comp_sub     <- list(x_sub_mat, x_sub_mat)
+
+# 2. Define a tiny grid & 2‐fold CV
+k_fast         <- 2
+reg_params_fast<- c(0.01, 0.1)
+sigma_grid_fast<- c(0.1, 1)
+
+# 3. Fast tuning on the subsample
+fast_tune_comp <- kernWLSBW(
+  x          = x_comp_sub,
+  y          = y_sub_vec,
+  kernel     = c("linear", "rbf"),
+  kern.param = list(
+    list(0),                     # dummy for linear
+    list(sigma = sigma_grid_fast)
+  ),
+  reg.param  = reg_params_fast,
+  k          = k_fast,
+  reps       = 1
+)
+
+# 4. Extract tuned hyperparameters correctly
+best_pars_comp   <- fast_tune_comp$best.kernpar   # numeric vector length 2
+best_linear_par  <- best_pars_comp[1]             # should be 0 for the linear kernel
+best_sigma_comp  <- best_pars_comp[2]             # chosen σ for RBF
+best_lambda_comp <- fast_tune_comp$best.regpar    # chosen λ
+
+cat("Fast best linear param:", best_linear_par, "\n")
+cat("Fast best σ:           ", best_sigma_comp, "\n")
+cat("Fast best λ:           ", best_lambda_comp, "\n")
+
+# 5. Refit on the full 75% remainder
+fast_comp_mod <- kernWLS(
+  x          = list(x_tr2_list[[1]], x_tr2_list[[1]]),
+  y          = y_tr2,
+  kernel     = c("linear", "rbf"),
+  kern.param = list(best_linear_par, best_sigma_comp),
+  reg.param  = best_lambda_comp
+)
+
+# 6. Evaluate on the held‐out 25%
+fast_pred_comp <- predict(
+  fast_comp_mod,
+  newx = list(x_te2_list[[1]], x_te2_list[[1]])
+)
+fast_rmse_comp <- sqrt(mean((fast_pred_comp - y_te2)^2))
+cat(sprintf("Fast Linear+RBF RMSE: %.2f\n", fast_rmse_comp))
+
+```
+

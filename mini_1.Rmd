@@ -1,0 +1,314 @@
+---
+title: "Mini_1"
+author: "Phoebe Jiang"
+date: "2025-05-01"
+output: html_document
+---
+
+
+
+```{r data}
+library(keras)
+library(dslabs)
+
+mnist <- read_mnist()           
+x_train <- mnist$train$images   # 60000 × 784 matrix
+y_train <- mnist$train$labels   # 60000-length vector
+
+keep <- y_train %in% c(0,1,2)
+x_sub <- x_train[keep, ]
+y_sub <- y_train[keep]
+
+# flatten 28×28 images to rows of length 784
+x_mat <- array_reshape(x_sub, c(nrow(x_sub), 28*28))
+
+set.seed(2025)
+idx <- sample(nrow(x_mat), 2000)
+x_mat <- x_mat[idx, ]
+y_sub <- y_sub[idx]
+
+```
+
+
+```{r pca}
+# PCA
+pca_res <- prcomp(x_mat, 
+                  center = TRUE, 
+                  scale. = FALSE)
+summary(pca_res)
+
+pc_df <- data.frame(
+  PC1   = pca_res$x[,1],
+  PC2   = pca_res$x[,2],
+  label = factor(y_sub)
+)
+
+library(ggplot2)
+ggplot(pc_df, aes(PC1, PC2, color = label)) +
+  geom_point(alpha = 0.6) +
+  labs(
+    title = "PCA (no scaling) of digits 0/1/2",
+    subtitle = paste0("Variance explained: PC1=", 
+                      round(summary(pca_res)$importance[2,1]*100,1),
+                      "%, PC2=",
+                      round(summary(pca_res)$importance[2,2]*100,1),
+                      "%"),
+    x = "PC1",
+    y = "PC2",
+    color = "Digit"
+  )
+
+```
+
+```{r kpca1}
+library(kernlab)
+
+# Run KPCA on flattened 0/1/2 digit matrix
+kpca_res <- kpca(
+  ~ .,
+  data     = as.data.frame(x_mat),
+  kernel   = "rbfdot",
+  kpar     = list(sigma = 0.05),
+  features = 2
+)
+
+#  Extract the first two kernel principal components
+kpc_coords <- rotated(kpca_res)
+kpc_df <- data.frame(
+  KPC1  = kpc_coords[,1],
+  KPC2  = kpc_coords[,2],
+  label = factor(y_sub)
+)
+
+# Plot with ggplot2
+library(ggplot2)
+ggplot(kpc_df, aes(KPC1, KPC2, color = label)) +
+  geom_point(alpha = 0.6) +
+  labs(
+    title    = "RBF Kernel PCA (σ = 0.05) of digits 0/1/2",
+    subtitle = "First two kernel principal components",
+    x        = "KPC1",
+    y        = "KPC2",
+    color    = "Digit"
+  ) +
+  theme_minimal()
+
+```
+
+```{r grid}
+# approximate mean squared distance
+d2 <- as.matrix(dist(x_mat))^2
+mean_d2 <- mean(d2)
+1/mean_d2   # ballpark σ
+
+sigmas <- c(1e-6, 5e-6, 1e-5, 5e-5, 1e-4)  # adjust around 1/mean_d2
+
+# set up a small multiplot
+par(mfrow = c(2, 3), mar = c(2, 2, 2, 1))
+for (s in sigmas) {
+  kp <- kpca(~., as.data.frame(x_mat),
+             kernel   = "rbfdot",
+             kpar     = list(sigma = s),
+             features = 2)
+  coords <- rotated(kp)
+  plot(coords,
+       col   = y_sub + 1,
+       pch   = 20,
+       main  = paste0("σ = ", s),
+       xaxt  = "n", yaxt = "n")
+}
+
+prop2 <- sapply(sigmas, function(s) {
+  kp  <- kpca(~., as.data.frame(x_mat),
+              kernel   = "rbfdot",
+              kpar     = list(sigma = s),
+              features = 50)    # get more PCs
+  ev  <- kp@eig               # eigenvalues
+  sum(ev[1:2]) / sum(ev)
+})
+plot(log10(sigmas), prop2, type = "b",
+     xlab = "log10(σ)", ylab = "Prop’n eigen-mass in PC1+PC2")
+
+
+```
+
+```{r best_sigma}
+# ballpark σ
+mean_d2 <- mean( as.matrix(dist(x_mat))^2 )
+base_sigma <- 1/mean_d2    # ≈1.46e-7
+
+# try a handful around that value
+sigmas <- base_sigma * c(0.2, 0.5, 1, 2, 5)
+
+# compute proportion of eigen‐mass in first 2 components
+prop2 <- sapply(sigmas, function(s) {
+  kp  <- kpca(~., as.data.frame(x_mat),
+              kernel   = "rbfdot",
+              kpar     = list(sigma = s),
+              features = 20)      # get top 20 PCs
+  ev  <- kp@eig
+  sum(ev[1:2]) / sum(ev)
+})
+grid_df <- data.frame(sigma = sigmas, prop2 = prop2)
+print(grid_df)
+```
+
+```{r kpca2}
+# 1. Best sigma from grid
+best_sigma <- grid_df$sigma[which.max(grid_df$prop2)]
+
+# 2. Re‐fit KPCA (2 components)
+kp_best <- kpca(
+  ~ .,
+  data     = as.data.frame(x_mat),
+  kernel   = "rbfdot",
+  kpar     = list(sigma   = best_sigma),
+  features = 2
+)
+
+# 3. Extract coordinates and labels
+coords <- as.data.frame(rotated(kp_best))
+colnames(coords) <- c("KPC1","KPC2")
+coords$label   <- factor(y_sub)
+
+# 4. Plot
+library(ggplot2)
+ggplot(coords, aes(KPC1, KPC2, color = label)) +
+  geom_point(alpha = 0.6) +
+  labs(
+    title    = sprintf("RBF Kernel PCA (σ = %.2g)", best_sigma),
+    subtitle = "Digits 0 / 1 / 2",
+    x        = "KPC1",
+    y        = "KPC2",
+    color    = "Digit"
+  ) +
+  theme_minimal()
+
+```
+
+```{r quantify}
+set.seed(2025)
+n    <- nrow(pc_df)
+train_idx <- sample.int(n, size = floor(0.7*n))
+test_idx  <- setdiff(seq_len(n), train_idx)
+
+# split PCA embeddings
+train_pca <- pc_df[train_idx, ]
+test_pca  <- pc_df[test_idx, ]
+
+# split KPCA embeddings
+train_kpca <- kpc_df[train_idx, ]
+test_kpca  <- kpc_df[test_idx, ]
+
+# load knn
+library(class)
+
+# 5-NN on the first two PCs
+knn_pca_pred  <- knn(
+  train     = train_pca[, c("PC1","PC2")],
+  test      = test_pca[,  c("PC1","PC2")],
+  cl        = train_pca$label,
+  k         = 5
+)
+acc_pca <- mean(knn_pca_pred == test_pca$label)
+
+# 5-NN on the first two KPCs
+knn_kpca_pred <- knn(
+  train     = train_kpca[, c("KPC1","KPC2")],
+  test      = test_kpca[,  c("KPC1","KPC2")],
+  cl        = train_kpca$label,
+  k         = 5
+)
+acc_kpca <- mean(knn_kpca_pred == test_kpca$label)
+
+cat(sprintf("5-NN accuracy on linear PCA (2 dims):  %.1f%%\n", 100*acc_pca))
+cat(sprintf("5-NN accuracy on RBF KPCA (2 dims):    %.1f%%\n", 100*acc_kpca))
+```
+
+```{r highest_acc}
+library(kernlab)
+library(class)
+
+set.seed(2025)
+n <- nrow(x_mat)
+train_idx <- sample(n, size = floor(0.7*n))
+test_idx  <- setdiff(seq_len(n), train_idx)
+
+# PCA baseline (2 dims)
+pc_train <- pc_df[train_idx, ]
+pc_test  <- pc_df[test_idx, ]
+pca_acc  <- mean(
+  knn(pc_train[,1:2], pc_test[,1:2], pc_train$label, k=5)
+  == pc_test$label
+)
+
+# KPCA grid
+sigmas <- base_sigma * c(0.1,0.5,1,2,5)  # around your base σ≈1.5e-7
+dims   <- c(2,3,5)
+
+results <- expand.grid(sigma = sigmas, features = dims,
+                       acc = NA_real_)
+
+for (i in seq_len(nrow(results))) {
+  s <- results$sigma[i]
+  d <- results$features[i]
+  kp <- kpca(~., as.data.frame(x_mat),
+             kernel   = "rbfdot",
+             kpar     = list(sigma=s),
+             features = d)
+  coords <- as.data.frame(rotated(kp))
+  coords$label <- factor(y_sub)
+  
+  tr <- coords[train_idx, ]
+  te <- coords[test_idx, ]
+  
+  pred <- knn(tr[,1:d], te[,1:d], tr$label, k=5)
+  results$acc[i] <- mean(pred == te$label)
+}
+
+print(results)
+cat(sprintf("PCA (2 dims) baseline accuracy = %.1f%%\n", 100*pca_acc))
+
+```
+
+```{r 3-dim_kpca}
+# 1. Re-fit KPCA with best sigma & 3 features
+best_sigma3 <- 1.466398e-08   # from grid (σ ≈ 1.47e-8)
+library(kernlab)
+kpca3 <- kpca(
+  ~ .,
+  data     = as.data.frame(x_mat),
+  kernel   = "rbfdot",
+  kpar     = list(sigma   = best_sigma3),
+  features = 3
+)
+
+# 2. Extract the first three kernel PCs
+coords3 <- as.data.frame(rotated(kpca3))
+colnames(coords3) <- c("KPC1","KPC2","KPC3")
+coords3$label <- factor(y_sub)
+
+# 3. Plot pairwise scatterplots
+library(ggplot2)
+p12 <- ggplot(coords3, aes(KPC1, KPC2, color = label)) +
+  geom_point(alpha = 0.6) +
+  labs(x = "KPC1", y = "KPC2", title = "KPC1 vs KPC2")
+
+p13 <- ggplot(coords3, aes(KPC1, KPC3, color = label)) +
+  geom_point(alpha = 0.6) +
+  labs(x = "KPC1", y = "KPC3", title = "KPC1 vs KPC3")
+
+p23 <- ggplot(coords3, aes(KPC2, KPC3, color = label)) +
+  geom_point(alpha = 0.6) +
+  labs(x = "KPC2", y = "KPC3", title = "KPC2 vs KPC3")
+
+# 4. Arrange with patchwork
+library(patchwork)
+
+(p12 | p13) /
+ p23 +
+  plot_layout(guides = "collect") &
+  theme_minimal() &
+  theme(legend.position = "bottom")
+```
+

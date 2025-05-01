@@ -243,7 +243,7 @@ pca_acc  <- mean(
 )
 
 # KPCA grid
-sigmas <- base_sigma * c(0.1,0.5,1,2,5)  # around your base σ≈1.5e-7
+sigmas <- base_sigma * c(0.1,0.5,1,2,5)  # around the base σ≈1.5e-7
 dims   <- c(2,3,5)
 
 results <- expand.grid(sigma = sigmas, features = dims,

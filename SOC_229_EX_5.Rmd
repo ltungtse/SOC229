@@ -1,0 +1,189 @@
+---
+title: "SOC_229_EX_5"
+author: "Phoebe Jiang"
+date: "2025-05-03"
+output: html_document
+---
+
+
+```{r}
+library(kernelTools)
+library(WDI)
+
+# 1) fetch & prepare Global Development Indicators --------------------------
+# define 10 indicators
+inds <- c(
+  GDPpc      = "NY.GDP.PCAP.CD",
+  LifeExp    = "SP.DYN.LE00.IN",
+  Literacy   = "SE.ADT.LITR.ZS",
+  Internet   = "IT.NET.USER.ZS",
+  Unemployment = "SL.UEM.TOTL.ZS",
+  Inflation  = "FP.CPI.TOTL.ZG",
+  AccessElec = "EG.ELC.ACCS.ZS",
+  Poverty    = "SI.POV.DDAY",
+  HealthExp  = "SH.XPD.CHEX.GD.ZS",
+  SchoolEnrol= "SE.PRM.NENR"
+)
+
+raw <- WDI(country="all", indicator=inds, start=2021, end=2021, extra=TRUE)
+# keep only countries (drop aggregates) and complete cases
+dat <- subset(raw, region!="Aggregates")
+
+# count NAs
+na_counts <- colSums(is.na(dat[, names(inds)]))
+
+# keep only those with <70 missing values (i.e. >50% complete)
+keep <- names(na_counts)[na_counts < 70]
+# build reduced data.frame of just the numeric indicators
+gdi_reduced <- dat[, keep]
+# assign unique rownames
+rownames(gdi_reduced) <- dat$country
+
+# Impute remaining missing values with median
+gdi_imputed <- as.data.frame(
+  lapply(gdi_reduced, function(x) {
+    x[is.na(x)] <- median(x, na.rm = TRUE)
+    return(x)
+  }),
+  row.names = rownames(gdi_reduced)
+)
+# coerce to a pure numeric matrix
+gdi_mat <- as.matrix(gdi_imputed)
+gdi_scaled <- scale(gdi_mat)
+```
+
+```{r}
+
+# 2) kMDS (metric vs non‑metric; linear vs RBF) -------------------------------
+# choose σ for RBF
+rbf_sigma <- 5  
+
+# metric kMDS
+mkm_lin <- kernMDS(gdi_scaled, kernel="linear", dim=2)
+mkm_rbf <- kernMDS(gdi_scaled, kernel="rbf", 
+                   kern.param=list(sigma=rbf_sigma), dim=2)
+
+# non‑metric kMDS (Kruskal)
+knm_lin <- kernMDS(gdi_scaled, 
+                   kernel="linear", 
+                   dim=2, 
+                   scaling.method="kruskal")
+knm_rbf <- kernMDS(gdi_scaled, 
+                   kernel="rbf", 
+                   kern.param=list(sigma=rbf_sigma),
+                   dim=2, 
+                   scaling.method="kruskal")
+
+# quick 2×2 plot
+par(mfrow=c(2,2), mar=c(4,4,2,1))
+plot(mkm_lin$coords, main="Metric KMDS, Linear", xlab="Dim1", ylab="Dim2")
+plot(mkm_rbf$coords, main="Metric KDMS, RBF", xlab="Dim1", ylab="Dim2")
+plot(knm_lin$coords, main="Non-metric, Linear", xlab="Dim1", ylab="Dim2")
+plot(knm_rbf$coords, main="Non-metric, RBF", xlab="Dim1", ylab="Dim2",
+     pch=19, cex=0.6)
+
+```
+
+```{r}
+# 3) kernelized Hierarchical Clustering --------------------------------------
+# Ward’s method
+khc_ward_lin <- kernHC(gdi_scaled, kernel="linear")
+khc_ward_rbf <- kernHC(gdi_scaled, kernel="rbf", 
+                       kern.param=list(sigma=rbf_sigma))
+
+# Complete & single link (RBF only)
+khc_comp_rbf   <- kernHC(gdi_scaled, kernel="rbf", 
+                         kern.param=list(sigma=rbf_sigma),
+                         clustering.method="complete")
+khc_single_rbf <- kernHC(gdi_scaled, kernel="rbf", 
+                         kern.param=list(sigma=rbf_sigma),
+                         clustering.method="single")
+
+# plot dendrograms
+par(mfrow=c(2,2), mar=c(4,4,2,1))
+plot(khc_ward_lin,   main="Ward, Linear",   label=FALSE, hang=-1)
+plot(khc_ward_rbf,   main="Ward, RBF",      label=FALSE, hang=-1)
+plot(khc_comp_rbf,   main="Complete, RBF",  label=FALSE, hang=-1)
+plot(khc_single_rbf, main="Single, RBF",    label=FALSE, hang=-1)
+
+k <- 3
+cl_ward_lin   <- cutree(khc_ward_lin$clustering,   k)
+cl_ward_rbf   <- cutree(khc_ward_rbf$clustering,   k)
+cl_comp_rbf   <- cutree(khc_comp_rbf$clustering,   k)
+cl_single_rbf <- cutree(khc_single_rbf$clustering, k)
+
+# Tabulate cluster sizes
+table(Linear_Ward=cl_ward_lin,
+      RBF_Ward=cl_ward_rbf,
+      RBF_Complete=cl_comp_rbf,
+      RBF_Single=cl_single_rbf)
+```
+
+```{r}
+library(RSpectra)
+# 4) kernel PCA ---------------------------------------------------------------
+# keep first 2 components
+kpca_rbf <- kernPCA(gdi_scaled, 
+                    kernel="rbf", 
+                    kern.param=list(sigma=rbf_sigma), 
+                    keep.ev=2)
+
+# α‑matrix heatmap
+heatmap(kpca_rbf$amat, Rowv=NA, Colv=NA,
+        main=expression("kPCA " ~ alpha ~ "-matrix"))
+
+# scatter of scores
+scores <- kpca_rbf$scores
+plot(scores, main="kPCA RBF scores (scaled σ=5)", 
+     xlab="PC1", ylab="PC2", 
+     pch=19, cex=0.6)
+text(scores, labels=rownames(gdi_scaled), cex=0.5, pos=3)
+
+# correlations (loadings) between inputs & components
+loadings <- cor(gdi_scaled, scores)
+print("Correlations (loadings) with PC1 & PC2:")
+print(round(loadings, 2))
+```
+
+```{r}
+library(dplyr)
+
+# 1) Extract cluster assignments (k = 3)
+clusters <- cutree(khc_ward_rbf$clustering, k = 3)
+
+# 2) Build a data.frame of country + cluster + the raw indicators
+#    (using un–scaled data so the means are in original units)
+df_clusters <- data.frame(
+  country   = rownames(gdi_reduced),
+  cluster   = factor(clusters),
+  GDPpc     = gdi_reduced[,"GDPpc"],
+  Internet  = gdi_reduced[,"Internet"],
+  LifeExp   = gdi_reduced[,"LifeExp"]
+)
+
+# 3) Look at how many countries per cluster
+table(df_clusters$cluster)
+
+# 4) Compute average GDPpc, Internet, LifeExp by cluster
+
+# Impute missing values specifically for GDPpc, Internet, and LifeExp:
+df_clusters$GDPpc[is.na(df_clusters$GDPpc)] <- median(df_clusters$GDPpc, na.rm = TRUE)
+df_clusters$Internet[is.na(df_clusters$Internet)] <- median(df_clusters$Internet, na.rm = TRUE)
+df_clusters$LifeExp[is.na(df_clusters$LifeExp)] <- median(df_clusters$LifeExp, na.rm = TRUE)
+
+# Compute averages by cluster:
+summary_by_cluster <- df_clusters %>%
+  group_by(cluster) %>%
+  summarize(
+    n             = n(),
+    mean_GDPpc    = mean(GDPpc),
+    mean_Internet = mean(Internet),
+    mean_LifeExp  = mean(LifeExp)
+  )
+
+print(summary_by_cluster)
+```
+
+
+
+

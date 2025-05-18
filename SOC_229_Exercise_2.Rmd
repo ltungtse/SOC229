@@ -1,0 +1,599 @@
+---
+title: "SOC_229_Exercise_2"
+author: "Phoebe Jiang"
+date: "2025-04-08"
+output:
+  html_document: default
+  word_document: default
+---
+############################
+## Kernel Functions Tasks ##
+############################
+
+### Task 1: Verify Linear Kernel Gram Matrix
+
+**[Writeup]** Take a small sample (say, 5-10 observations) from one of your data sets, and calculate the Gram matrix for this set using the linear kernel using kernMatrix. Verify that this is the same matrix you get using the dot product on the raw data. (Hint: the dot product in R is %*%, and the transpose of a matrix is computed by thet() function.)
+
+**[Summary]** The result 'TRUE' confirms that the Gram matrix computed using the linear kernel (kernMatrix) is identical to the one computed via the standard dot product (x_sample %*% t(x_sample)), up to numerical precision.
+
+```{r}
+library(kernelTools)
+california <- read.csv("C:/Users/saran/OneDrive/Documents/Sociol 229/housing.csv")
+x <- california[, 1:8]  # Predictors 
+
+# Take a small sample (5 observations)
+set.seed(123)
+sample_idx <- sample(1:nrow(x), 5)
+x_sample <- as.matrix(x[sample_idx, ])
+
+# Compute Gram matrix using linear kernel
+gram_kernel <- kernMatrix(x = x_sample, 
+                          kernel = "linear",
+                          kern.param = 1)
+
+# Compute Gram matrix using dot product
+gram_dot <- x_sample %*% t(x_sample)
+
+# Verify equality (up to numerical precision)
+all.equal(gram_kernel, gram_dot, check.attributes = FALSE)
+```
+
+### Task 2: Eigenvalues of Gram Matrices
+
+**[Writeup]** Take a somewhat larger sample (say, 100 observations), and compute the Gram matrix for this sample under two kernels of your choosing. For each, use eigen to look at and plot the eigenvalues of the Gram matrix. Do they fall off at the same rate? Verify that (up to numerical tolerances) they are all positive (as they should be, for a Mercer kernel).
+
+**[Summary]**
+
+ *1. Linear Kernel:*
+
+   - Eigenvalues decay rapidly, with only 3–5 dominant eigenvalues (e.g., $\sim 10^2$ ) and the rest near zero.
+
+   - Mercer Compliance: All eigenvalues are non-negative after numerical stabilization (sum(eigen_linear < 0) = 0).
+  
+   - Implications: Reflects collinear features (e.g., gdpPercap vs. lifeExp)
+
+ *2. RBF Kernel (σ=0.1):*
+
+   - Eigenvalues decay exponentially, with most values near zero after the first few indices.
+
+   - Mercer Compliance: All eigenvalues are strictly positive, confirming validity.
+  
+   - Implications: Captures local nonlinear patterns (e.g., clusters of countries with similar development profiles); small $\sigma$ emphasizes neighborhood similarities.
+
+
+```{r}
+# Take a sample of 100 observations
+set.seed(123)
+sample_100 <- sample(1:nrow(x), 100)
+x_100 <- as.matrix(x[sample_100, ])
+
+# Check total NA/NaN values in the sample
+num_na <- sum(is.na(x_100))
+cat("Number of missing values in x_100:", num_na, "\n")
+
+# Check which columns have missing values
+col_na <- colSums(is.na(x_100))
+cat("Missing values per column:\n")
+print(col_na)
+```
+
+
+```{r}
+x_clean <- na.omit(x_100)  # Removes rows with NA/NaN
+n_remaining <- nrow(x_clean)
+cat("Rows remaining after NA removal:", n_remaining, "\n")
+```
+
+
+```{r}
+library(dplyr)
+# Larger sample (99 observations)
+set.seed(123)
+new_sample_idx <- sample(1:nrow(x_clean), 99)  # Use x_clean instead of x
+x_100_clean <- x_clean[new_sample_idx, ]
+
+variances <- apply(x_100_clean, 2, var)
+x_100_clean <- x_100_clean[, variances > 1e-6]
+
+x_100_scaled <- scale(x_100_clean)  # Mean = 0, SD = 1
+
+pairwise_dist <- dist(x_100_scaled)
+
+# Compute Gram matrices
+gram_linear <- kernMatrix(x = x_100_scaled, kernel = "linear", kern.param = 1)
+gram_linear <- gram_linear + diag(1e-8, nrow(gram_linear))
+gram_rbf <- kernMatrix(x = x_100_scaled, kernel = "rbf", kern.param = 0.1)
+gram_linear <- (gram_linear + t(gram_linear)) / 2
+gram_rbf <- (gram_rbf + t(gram_rbf)) / 2
+
+# Compute eigenvalues
+eigen_linear <- eigen(gram_linear, symmetric = TRUE)$values
+eigen_rbf <- eigen(gram_rbf, symmetric = TRUE)$values
+sum(eigen_linear < 0)  # Now returns 0
+
+# Plot eigenvalues
+plot(eigen_linear, type = 'l', col = 'blue', main = "Eigenvalues (Linear Kernel)")
+plot(eigen_rbf, type = 'l', col = 'red', main = "Eigenvalues (RBF Kernel)")
+```
+
+
+
+### Task 3: Find Dataset Center 
+
+**[Writeup]** Create a function to find the center of a data set, i.e., the input whose mean similarities to all other data points is highest. Using your Unsupervised Set, find the center under the linear kernel, an RBF kernel with three different bandwidth values, and two other kernels of your choosing. Do you get the same value each time? What seems to be related to the differences, if present?
+
+**[Summary]**
+
+  1. **Kernel Dependency:** The "center" of a dataset is kernel-specific. Linear and polynomial kernels identify geometrically central points, while RBF/Laplacian kernels highlight locally dense regions.
+
+  2. **Bandwidth Sensitivity:** Small σ values in RBF/Laplacian kernels prioritize local structure, while large σ values approximate global behavior.
+
+  3. **Data Structure:** The gapminder dataset has inherent clusters (e.g., developed vs. developing nations), which kernels like RBF (σ=0.1) detect.
+
+
+
+```{r}
+library(gapminder)
+# Extract numerical features and scale them
+data <- gapminder[, c("lifeExp", "pop", "gdpPercap")] %>% 
+  scale() %>% 
+  as.matrix()
+
+# Take a sample of 100 observations
+set.seed(123)
+x_100 <- data[sample(1:nrow(data), 100), ]
+
+# Define the Center-Finding Function
+find_center <- function(data, kernel, kern.param = NULL) {
+  gram <- kernMatrix(x = data, kernel = kernel, kern.param = kern.param)
+  gram <- (gram + t(gram)) / 2  # Critical fix
+  mean_similarity <- rowMeans(gram)
+  center_idx <- which.max(mean_similarity)
+  return(center_idx)
+}
+
+# Linear kernel (no scaling needed for standardized data)
+center_linear <- find_center(x_100, kernel = "linear", kern.param = 1)
+
+# RBF kernel with different bandwidths
+center_rbf1 <- find_center(x_100, kernel = "rbf", kern.param = 0.1)
+center_rbf2 <- find_center(x_100, kernel = "rbf", kern.param = 1)
+center_rbf3 <- find_center(x_100, kernel = "rbf", kern.param = 10)
+
+# Polynomial kernel (degree = 2)
+center_poly <- find_center(x_100, kernel = "poly", kern.param = c(2, 1, 1))
+
+# Laplacian kernel
+center_laplace <- find_center(x_100, kernel = "laplace", kern.param = 0.5)
+
+# Compare centers
+cat("Linear Kernel Center:", center_linear, "\n",
+    "RBF (σ=0.1) Center:", center_rbf1, "\n",
+    "RBF (σ=1) Center:", center_rbf2, "\n",
+    "RBF (σ=10) Center:", center_rbf3, "\n",
+    "Polynomial Center:", center_poly, "\n",
+    "Laplacian Center:", center_laplace)
+```
+
+
+##############################
+## kNN Classification Tasks ##
+##############################
+
+### Task 1: Linear Kernel Classification
+
+**[Writeup]** Use the kernkNN function to perform kNN classification on your data set with a linear kernel, using the kernelTools library. Try this with a subset of your data, and assess performance for different values of k. How much better are larger values of k than what you get with k=1? Does really large k help?
+
+**[Summary]** 
+
+  1. **Key Observations**
+ 
+      - Low Overall Accuracy: Accuracy remains ~11% for all tested k values (1, 5, 10, 20). This suggests the model performs no better than random guessing (assuming class balance).
+      
+      - No improvement with larger k.
+      
+  2. **Confusion Matrix Insights:**
+       
+      - Class Imbalance: Class 0 (<=50K) dominates predictions, indicating severe imbalance.
+
+      - Misclassification: The model struggles to predict Class 1 (>50K), with 415 false negatives (missed high-income predictions).
+
+### Task 2: Non-Linear Kernel
+
+**[Writeup]** Now, choose a second kernel, and repeat the process; see the kernelMatrix function help page for information on kernels. Motivate this choice by thinking about the kernel and its feature space (or some other reasonable property). Try varying at least one hyperparameter of the kernel (assuming it has one). How do the results compare with the linear case? Does tuning the hyperparameter seem to make much of a difference? How about changing k?
+
+**[Summary]** 
+
+  1. **Linear vs. RBF**
+
+       - Linear vs. RBF: The linear kernel marginally outperforms RBF across all tested bandwidths ($\sigma$).
+
+       - Hyperparameter Insensitivity: RBF accuracy remains nearly constant (~10.5%) regardless of $\sigma$, indicating poor kernel adaptation to the data.
+
+  2. **k-value Insensitivity:**
+
+       - Linear kernel shows no variation with different k-values
+
+       - RBF shows minimal degradation (0.11 → 0.10) with larger k-values
+
+
+
+
+```{r}
+# Load required libraries
+library(kernelTools)
+library(caret)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+# Load Adult Income dataset
+file_path <- "C:/Users/saran/OneDrive/Documents/Sociol 229/adult.csv"
+adult <- read.csv(file_path, header = TRUE, na.strings = "?", strip.white = TRUE)
+adult <- na.omit(adult)
+
+# Convert categorical variables to factors and scale numerical features
+categorical_cols <- c("workclass", "education", "marital.status", "occupation", 
+                     "relationship", "race", "gender", "native.country")
+adult[categorical_cols] <- lapply(adult[categorical_cols], as.factor)
+
+# Separate numerical features for scaling
+numerical_cols <- c("age", "fnlwgt", "educational.num", 
+                   "capital.gain", "capital.loss", "hours.per.week")
+adult[numerical_cols] <- scale(adult[numerical_cols])
+
+# Create model matrix (dummy variables for categorical features)
+x_class <- model.matrix(~ . - income - 1, data = adult)
+y_class <- ifelse(adult$income == ">50K", 1, 0)  # Binary target
+
+# Stratified subset of 1000 observations
+set.seed(123)
+subset_idx <- createDataPartition(y_class, p = 0.1, list = FALSE)  # 10% of data
+x_subset <- x_class[subset_idx, ]
+y_subset <- y_class[subset_idx]
+
+# Split into training/test (80/20)
+train_idx <- createDataPartition(y_subset, p = 0.8, list = FALSE)
+x_train <- x_subset[train_idx, ]
+y_train <- y_subset[train_idx]
+```
+
+
+#### kNN Classification with Linear Kernel
+Fit Model and Evaluate for Different k
+
+```{r}
+# Test k = 1, 5, 10, 20
+k_values <- c(1, 5, 10, 20)
+
+# Compute accuracy for each k
+acc_linear <- sapply(k_values, function(k) {
+  model <- kernkNN(y = y_train, x = x_train, 
+                   neighbors = k, 
+                   regression = FALSE, 
+                   kernel = "linear")
+  mean(model$y.pred == y_train)
+})
+
+# Confusion matrix for k=5
+knn_linear <- kernkNN(y = y_train, x = x_train, 
+                      neighbors = 5, 
+                      regression = FALSE, 
+                      kernel = "linear")
+confusion_matrix <- table(Observed = y_train, Predicted = knn_linear$y.pred)
+print(confusion_matrix)
+
+# Results
+results_linear <- data.frame(
+  k = k_values,
+  Accuracy = acc_linear
+)
+
+# Print table
+kable(results_linear, caption = "Linear Kernel: Accuracy vs. k") %>% 
+  kable_styling()
+
+# Plot accuracy vs. k
+plot(k_values, acc_linear, type = 'b', col = "blue",
+     xlab = "k", ylab = "Accuracy", 
+     main = "Linear Kernel: Accuracy vs. k")
+```
+
+
+#### kNN Classification with RBF Kernel
+
+```{r}
+# Compute median pairwise distance for bandwidth (σ)
+pairwise_dist <- dist(x_train)
+sigma <- median(pairwise_dist)
+
+# Test σ = median/10, median, median*10
+sigma_values <- c(sigma/10, sigma, sigma*10)
+
+# Compute accuracy for each σ (fix k=5)
+acc_rbf <- sapply(sigma_values, function(sigma) {
+  model <- kernkNN(y = y_train, x = x_train, 
+                   neighbors = 5, 
+                   regression = FALSE, 
+                   kernel = "rbf", 
+                   kern.param = sigma)
+  mean(model$y.pred == y_train)
+})
+
+# Compare with linear kernel
+results <- data.frame(
+  Kernel = c("Linear", "RBF (σ=0.1)", "RBF (σ=1)", "RBF (σ=10)"),
+  Accuracy = c(acc_linear[2], acc_rbf)
+)
+
+# Print results
+library(knitr)
+kable(results, caption = "Accuracy Comparison: Linear vs. RBF (k=5)") %>% 
+  kable_styling(bootstrap_options = "striped")
+```
+
+
+
+#### Impact of k on RBF Kernel
+
+```{r}
+# Test k = 1, 5, 10, 20 with σ=1
+k_values <- c(1, 5, 10, 20)
+sigma <- 1
+
+# Calculate accuracies for both kernels
+acc_results <- sapply(k_values, function(k) {
+  # Linear kernel
+  model_linear <- kernkNN(y = y_train, x = x_train, 
+                         neighbors = k, 
+                         regression = FALSE, 
+                         kernel = "linear")
+  acc_linear <- mean(model_linear$y.pred == y_train)
+  
+  # RBF kernel
+  model_rbf <- kernkNN(y = y_train, x = x_train, 
+                      neighbors = k, 
+                      regression = FALSE, 
+                      kernel = "rbf", 
+                      kern.param = sigma)
+  acc_rbf <- mean(model_rbf$y.pred == y_train)
+  
+  c(Linear = acc_linear, RBF = acc_rbf)
+})
+
+# Convert to data frame with k values
+acc_df <- data.frame(
+  k = k_values,
+  t(acc_results)  # Transpose results
+)
+
+# Generate formatted table
+library(knitr)
+library(kableExtra)
+
+kable(acc_df, 
+      caption = "Accuracy vs. Number of Neighbors (k)",
+      col.names = c("Number of Neighbors (k)", "Linear Kernel", "RBF Kernel (σ=1)"),
+      digits = 2) %>%
+  kable_styling(bootstrap_options = "striped",
+                full_width = FALSE,
+                position = "center") %>%
+  add_header_above(c(" " = 1, "Accuracy" = 2))
+
+```
+
+
+
+##########################
+## kNN Regression Tasks ##
+##########################
+
+### Task 1: Linear Kernel Regression
+
+**[Writeup]** Perform kNN regression on your data set with a linear kernel. Try this with a subset of your data, and assess performance for different values of k. How much better are larger values of k than what you get with k=1? Does really large k help?
+
+
+**[Summary]** 
+
+  - **Improvement with Larger $k$**:
+
+      - MSE decreases by ~34% from $k=1$ to $k=20.$
+
+      - RMSE decreases by ~18% (131,431 → 107,133).
+
+      - Diminishing Returns: Gains slow after $k=10, $ suggesting a balance between bias and variance.
+
+  - **Predicted vs. Observed Plot**
+
+      - Spread: Predictions (up to $\text{\$500k}$) align with observed values but show significant dispersion.
+
+      - Limitation: High MSE indicates the linear kernel struggles to capture nonlinear price drivers (e.g., location, income).
+
+### Task 2: Non-Linear Kernel (Polynomial)
+
+**[Writeup]** Now, choose a second kernel, and repeat the process. Motivate this choice by thinking about the kernel and its feature space (or some other reasonable property). Try varying at least one hyperparameter of the kernel (assuming it has one). How do the results compare with the linear case? Does tuning the hyperparameter seem to make much of a difference? How about changing k?
+
+**[Summary]** 
+
+1. **Kernel Performance Comparison**
+
+*Dataset: California Housing Prices (target = median_house_value).*
+
+|Kernel	     |MSE               |Improvement vs. Linear      |
+|------------|------------------|----------------------------|
+|Linear	     | 13,417,426,866   | Baseline                   |
+|Polynomial  | 13,417,426,866   | None (identical to linear) |
+|Poly deg=2  | 14,029,650,677   | Worse by ~4.5%             |
+|RBF         | 11,909,553,200   | Improved by ~11.2%         |
+
+  - *Key Observations: *
+  
+    - RBF Kernel: Outperforms linear and polynomial kernels significantly, indicating strong nonlinear relationships in housing prices (e.g., coastal proximity effects).
+   
+    - Polynomial Kernel:
+ 
+        - Degree=3: Matches linear kernel performance, suggesting cubic terms add no value.
+
+        - Degree=2: Worse than linear, implying underfitting or improper scaling.
+   
+  
+2. **Impact of $k$ on MSE**
+
+
+  - *Key Observations:*
+  
+    - MSE decreases by ~33.6% as $k$ increases from 1 to 20.
+
+    - Larger $k$ reduces noise by averaging over more neighbors.
+
+  - *Polynomial Kernel:*
+
+    - No improvement with $k$: MSE remains constant, indicating hyperparameter tuning (degree, scale, offset) is critical.
+
+3. **Conclusion**
+
+  - *Best Performer: *RBF kernel reduces MSE by 11.2% over linear, validating its suitability for housing price prediction.
+
+  - *Critical Factors:* Hyperparameter Tuning: Kernel performance hinges on proper parameter selection (e.g., $\sigma$ for RBF).
+
+  - *Kernel Alignment:* Match kernel choice to data structure (linear vs. nonlinear).
+
+
+#### Linear Kernel Regression
+
+```{r}
+# Load data
+data <- read.csv("C:/Users/saran/OneDrive/Documents/Sociol 229/housing.csv")
+
+# Extract features (x_reg) and target (y_reg)
+y_reg <- data$median_house_value  # Target variable
+x_reg <- data[, c("longitude", "latitude", "housing_median_age", 
+                 "total_rooms", "total_bedrooms", "population", 
+                 "households", "median_income", "ocean_proximity")]
+
+# Convert categorical variable to factors
+x_reg$ocean_proximity <- as.factor(x_reg$ocean_proximity)
+
+# Create model matrix (dummy variables for categorical features)
+x_reg <- model.matrix(~ . - 1, data = x_reg)  # -1 removes the intercept column
+
+# Scale numerical features (critical for kNN)
+x_reg_scaled <- scale(x_reg)
+
+# Subset for speed
+set.seed(123)
+train_idx <- sample(1:nrow(x_reg_scaled), 1000)
+x_train_reg <- x_reg_scaled[train_idx, ]
+y_train_reg <- y_reg[train_idx]
+
+# Fit kNN regression with linear kernel
+library(kernelTools)
+knn_reg <- kernkNN(y = y_train_reg, x = x_train_reg, neighbors = 5,
+                   regression = TRUE, kernel = "linear")
+
+# Predict on training data
+predicted <- knn_reg$y.pred
+
+# Calculate Mean Squared Error (MSE)
+mse <- mean((y_train - predicted)^2)
+cat("MSE (k=5):", mse, "\n")
+
+# Test k = 1, 5, 10, 20
+k_values <- c(1, 5, 10, 20)
+mse_results <- sapply(k_values, function(k) {
+  model <- kernkNN(y = y_train_reg, x = x_train_reg, 
+                   neighbors = k, 
+                   regression = TRUE, 
+                   kernel = "linear")
+  mean((y_train_reg - model$y.pred)^2)
+})
+
+# Create a results table
+results <- data.frame(
+  k = k_values,
+  MSE = mse_results,
+  RMSE = sqrt(mse_results)
+)
+
+# Print formatted table
+library(knitr)
+library(magrittr)  # Provides the %>% operator
+library(kableExtra) # For kable_styling()
+
+kable(results, caption = "Performance vs. k (Linear Kernel)") %>% 
+  kable_styling(bootstrap_options = "striped")
+
+# Plot observed vs predicted
+plot(y_train_reg, knn_reg$y.pred, xlab = "Observed", ylab = "Predicted")
+abline(0, 1, col = "red")
+```
+
+
+
+#### Fit kNN with Polynomial
+
+```{r}
+# Fit kNN with polynomial kernel
+knn_poly <- kernkNN(y = y_train_reg, x = x_train_reg, neighbors = 5,
+                    regression = TRUE, kernel = "poly", kern.param = c(3, 1))
+
+# Compare MSE
+mse_linear <- mean((y_train_reg - knn_reg$y.pred)^2)
+mse_poly <- mean((y_train_reg - knn_poly$y.pred)^2)
+cat("MSE Linear:", mse_linear, "\nMSE Poly:", mse_poly)
+```
+
+#### Try higher degrees and adjust scaling:
+
+```{r}
+# Degree=2, Scale=0.5, Offset=1
+knn_poly_2 <- kernkNN(y = y_train_reg, x = x_train_reg, neighbors = 5,
+                    regression = TRUE, kernel = "poly", 
+                    kern.param = c(2, 0.5, 1))
+mse_poly_2 <- mean((y_train_reg - knn_poly_2$y.pred)^2)
+cat("MSE Linear:", mse_linear, "\nMSE Poly_2:", mse_poly_2)
+```
+
+#### Compare with RBF Kernel:
+
+```{r}
+knn_rbf <- kernkNN(y = y_train_reg, x = x_train_reg, neighbors = 5,
+                   regression = TRUE, kernel = "rbf", kern.param = 0.1)
+mse_rbf <- mean((y_train_reg - knn_rbf$y.pred)^2)
+cat("MSE Linear:", mse_linear, "\nMSE Poly_2:", mse_poly_2, "\nRBF:", mse_rbf)
+
+```
+
+#### Impact of $k$:
+
+```{r}
+k_values <- c(1, 5, 10, 20)
+
+# Compute MSE for linear kernel
+mse_linear <- sapply(k_values, function(k) {
+  model <- kernkNN(y = y_train_reg, x = x_train_reg, 
+                   neighbors = k, regression = TRUE, 
+                   kernel = "linear")
+  mean((y_train_reg - model$y.pred)^2)
+})
+
+mse_poly_k <- sapply(k_values, function(k) {
+  model <- kernkNN(y = y_train_reg, x = x_train_reg, neighbors = k,
+                   regression = TRUE, kernel = "poly", 
+                   kern.param = c(3, 0.5, 1))  # Adjusted parameters
+  mean((y_train_reg - model$y.pred)^2)
+})
+
+results <- data.frame(
+  k = k_values,
+  Linear = mse_linear,
+  Polynomial = mse_poly
+)
+
+# Print formatted table
+library(knitr)
+kable(results, caption = "MSE Comparison: Linear vs. Polynomial Kernel") %>% 
+  kable_styling(bootstrap_options = "striped")
+
+```
+

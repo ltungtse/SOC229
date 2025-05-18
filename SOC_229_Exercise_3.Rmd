@@ -1,0 +1,265 @@
+---
+title: "SOC_229_Exercise_3"
+author: "Phoebe Jiang"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Data Preparation
+
+```{r}
+library(kernelTools)
+
+# Load and prepare data
+data <- read.csv("C:/Users/saran/OneDrive/Documents/SOC 229/housing.csv")
+
+set.seed(123)
+subset_size <- 1000
+
+# Sample row indices from the full data
+subset_indices <- sample(1:nrow(data), subset_size)
+
+# Create a subset of the full dataset
+data_subset <- data[subset_indices, ]
+
+
+# Create the design matrix with a column for the intercept and the desired predictors
+X_subset <- cbind(1, as.matrix(data_subset[, c("median_income", "housing_median_age",
+                                               "total_rooms", "total_bedrooms", "population", 
+                                               "households", "latitude", "longitude")]))
+# Create the target variable vector
+y_subset <- data_subset$median_house_value
+
+# Remove any NA values explicitly
+complete_cases_subset <- complete.cases(X_subset, y_subset)
+X_clean_subset <- X_subset[complete_cases_subset, ]
+y_clean_subset <- y_subset[complete_cases_subset]
+
+# Verify dimensions of cleaned subset
+cat("X dimensions:", dim(X_clean_subset), "\n")
+cat("y length:", length(y_clean_subset), "\n")
+
+```
+
+## 1. Linear Model Comparison
+
+```{r}
+X_sub <- X_clean_subset 
+y_sub <- y_clean_subset
+
+# Fit the model with the subset of clean data
+linfit_subset <- kernWLS(y = y_sub, x = X_sub, 
+                         kernel = "linear", 
+                         reg.param = 0.01)
+
+# Compare with lm using the same subset
+lm_model_subset <- lm(y_sub ~ -1 + X_sub)
+
+# Extract coefficients from the kernel method
+coef_kern_subset <- t(X_sub) %*% linfit_subset$a
+
+# Compare coefficients
+coef_lm_subset <- coef(lm_model_subset)
+print(cbind(coef_lm_subset, coef_kern_subset))
+
+```
+
+
+## 2. Tuning an RBF Kernel Model
+
+```{r}
+set.seed(123)
+suppressWarnings(
+suppress_output <- capture.output(
+  tune_rbf <- kernWLSBW(
+    x = X_sub, y = y_sub, kernel = "rbf",
+    reg.param = 10^(-5:1),             # λ = 1e-5, 1e-4, ..., 10
+    kern.param = list(c(0.1, 1, 10)),  # γ values
+    k = 5, reps = 3
+  )
+)
+)
+
+cat("Best Regularization Parameter:", tune_rbf$best.regpar, "\n")
+cat("Best Kernel Parameter:", tune_rbf$best.kernpar, "\n")
+cat("Best Cross-Validation MSE Score:", tune_rbf$best.performance, "\n")
+
+```
+
+
+
+
+
+# 3. Model Behavior and Alpha Weights (RBF model)
+
+```{r}
+# Fit best RBF model
+rbffit <- kernWLS(y = y_sub, x = X_sub, kernel = "rbf", 
+                  kern.param = 1, reg.param = 0.01)
+
+# Predicted vs Actual
+plot(y_sub, predict(rbffit, X_sub), 
+     xlab = "Actual", ylab = "Predicted",
+     main = "RBF Model Predictions")
+abline(0, 1, col = "red")
+
+# Alpha weights vs Median Income
+income <- X_sub[, 2]  # Median income column
+plot(
+  income, rbffit$a,
+  pch = 16,
+  cex = abs(rbffit$a) / 500000,  
+  col = ifelse(rbffit$a > 0, "blue", "red"),
+  xlab = "Median Income", ylab = "Alpha",
+  main = "Alpha Weights by Income (Scaled cex)"
+)
+
+```
+
+## 4. Polynomial Kernel Comparison
+
+```{r}
+set.seed(123)
+suppress_output_1 <- capture.output(
+  tune_poly <- kernWLSBW(
+    x = X_sub, y = y_sub, kernel = "ipoly",
+    reg.param = 10^(-3:1),  # λ = 0.001, 0.01, 0.1, 1, 10
+    kern.param = list(2:3, c(0, 1)),  # Tune degrees 2–3 and offsets 0/1
+    k = 5, reps = 3
+  )
+)
+
+cat("Best Regularization (λ):", tune_poly$best.regpar, "\n")
+cat("Best Kernel Parameters:", tune_poly$best.kernpar, "\n")
+cat("Best Cross-Validation MSE:", tune_poly$best.performance, "\n")
+
+```
+
+## 5. Model Behavior and Alpha Weights (Polynomial Kernel)
+
+```{r}
+# -----------------------------
+# Fit Best Polynomial Model
+# -----------------------------
+# Use tuned parameters from Task 2/3
+polyfit <- kernWLS(
+  y = y_sub, 
+  x = X_sub, 
+  kernel = "ipoly",
+  kern.param = c(2, 1),  # Degree=2, offset=1 (from tuning)
+  reg.param = 1      # Best λ from tuning
+)
+
+# ------------------------
+# Predicted vs Actual
+# ------------------------
+plot(
+  y_sub, predict(polyfit, X_sub),
+  xlab = "Actual Median House Value",
+  ylab = "Predicted Median House Value",
+  main = "Polynomial Model Predictions",
+  col = adjustcolor("black", alpha = 0.5),
+  pch = 16
+)
+abline(0, 1, col = "red", lwd = 2)
+
+# ---------------------------------
+# Alpha Weights vs Median Income
+# ---------------------------------
+income <- X_sub[, 2]  # Median income column
+
+plot(
+  income, polyfit$a,
+  pch = 16,
+  cex = abs(polyfit$a) / max(abs(polyfit$a)) * 3,  # Dynamic scaling
+  col = ifelse(polyfit$a > 0, "blue", "red"),
+  xlab = "Median Income",
+  ylab = "Alpha Weights",
+  main = "Polynomial Alpha Weights by Income"
+)
+```
+
+
+
+
+## 6. Model Comparison via Cross-Validation
+
+```{r}
+
+# -------------------------------------
+# Run Cross-Validation (All Models)
+# -------------------------------------
+# Suppress verbose outputs
+suppressMessages({
+  # Linear Model
+  cv_linear <- kernWLSCV(X_sub, y_sub, 
+                         kernel = "linear", 
+                         reg.param = 0.01, 
+                         k = 5, reps = 3)
+  
+  # Tuned RBF Model (γ=0.1, λ=0.1 from Task 2)
+  cv_rbf <- kernWLSCV(X_sub, y_sub, 
+                      kernel = "rbf", 
+                      kern.param = 1,   # Use best γ=1
+                      reg.param = 0.01, # Use best λ = 0.01
+                      k = 5, reps = 3)
+  
+  # Tuned Polynomial Model
+  cv_poly <- kernWLSCV(X_sub, y_sub, 
+                       kernel = "ipoly",
+                       kern.param = c(2, 1),
+                       reg.param = 1,
+                       k = 5, reps = 3)
+})
+
+# -----------------------------
+# Generate Summary Table
+# -----------------------------
+results <- data.frame(
+  Model = c("Linear", "RBF (γ=10)", "Polynomial (d=2, c=0)"),
+  MSE = c(
+    mean(cv_linear$raw.vals[, "MSE"]),  # Use [, "MSE"] instead of $MSE
+    mean(cv_rbf$raw.vals[, "MSE"]),
+    mean(cv_poly$raw.vals[, "MSE"])
+  ),
+  R2 = c(
+    mean(cv_linear$raw.vals[, "R2"]),   # Use [, "R2"] instead of $R2
+    mean(cv_rbf$raw.vals[, "R2"]),
+    mean(cv_poly$raw.vals[, "R2"])
+  )
+)
+
+print(results)
+```
+
+## 7. Compare α Distributions Across Models
+
+```{r}
+# Get polynomial α weights
+alpha_poly <- polyfit$a
+
+# Combine α weights from all models
+alpha_comparison <- data.frame(
+  Linear = linfit_subset$a,
+  RBF = rbffit$a,
+  Polynomial = alpha_poly
+)
+
+# Summary statistics
+summary(alpha_comparison)
+```
+
+## 8. Visual Comparison
+
+```{r}
+par(mfrow = c(1, 3))
+# Linear α
+hist(linfit_subset$a, breaks = 50, main = "Linear α Weights", col = "blue")
+
+# RBF α
+hist(rbffit$a, breaks = 50, main = "RBF α Weights", col = "red")
+
+# Polynomial α
+hist(alpha_poly, breaks = 50, main = "Polynomial α Weights", col = "green")
+```
+

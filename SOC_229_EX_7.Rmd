@@ -1,0 +1,176 @@
+---
+title: "SOC_229_EX_7"
+author: "Phoebe Jiang"
+date: "2025-05-15"
+output: html_document
+---
+
+
+
+```{r data}
+library(MASS)
+library(kernelTools)
+
+# Load and clean data correctly
+adult <- read.csv("adult.csv", header=FALSE, na.strings="?")
+colnames(adult) <- c("age","workclass","fnlwgt","education","educational.num",
+                     "marital.status","occupation","relationship","race",
+                     "gender","capital.gain","capital.loss","hours.per.week",
+                     "native.country","income")
+
+# Drop missing data early
+adult <- na.omit(adult)
+
+# Make X (predictors) and y (outcome)
+X <- model.matrix(income ~ . -1, data=adult)
+y <- adult$income
+stopifnot(nrow(X) == length(y)) # Must pass this step
+
+# Train-test split
+set.seed(2025)
+n     <- nrow(X)
+train <- sample(seq_len(n), size=0.7*n)
+test  <- setdiff(seq_len(n), train)
+
+X_tr <- X[train, ]; y_tr <- y[train]
+X_te <- X[test, ];  y_te <- y[test]
+
+cat("Train rows X:", nrow(X_tr), "y:", length(y_tr), "\n")
+cat("Test rows X:", nrow(X_te), "y:", length(y_te), "\n")
+```
+
+
+
+```{r split&tuning}
+n_tr    <- nrow(X_tr)
+sub_n   <- 500                
+sub_idx <- sample(seq_len(nrow(X_tr)), sub_n) 
+
+X_sub <- X_tr[sub_idx, ]
+y_sub <- y_tr[sub_idx]
+
+# 2b. tune on the subset
+tune_sub <- kernFDABW(
+  x         = X_sub, 
+  y         = y_sub,
+  k         = 5, 
+  reps      = 3,
+  kernel    = "rbf",
+  reg.param = 10^(-2:2),
+  kern.param= list(10^(-2:2)),
+  metric    = "Acc",
+  verbose   = FALSE
+)
+
+# inspect best params
+print(tune_sub$best.kernpar)
+print(tune_sub$best.regpar)
+
+```
+
+
+```{r final&evaluate}
+# RFF function
+makeRFF <- function(X, sigma, D){
+  d     <- ncol(X)
+  Omega <- matrix(rnorm(d*D, sd=1/sigma), nrow=d)
+  b     <- runif(D, 0, 2*pi)
+  M     <- X %*% Omega
+  Z     <- sqrt(2/D) * cos(sweep(M, 2, b, "+"))
+  return(Z)
+}
+
+# 3a. Map subset to RFF features
+sigma  <- unname(tune_sub$best.kernpar)
+D      <- 200
+Z_tr   <- makeRFF(X_sub, sigma, D)
+Z_te   <- makeRFF(X_te, sigma, D)
+
+# Name the columns identically
+colnames(Z_tr) <- paste0("RF", seq_len(D))
+colnames(Z_te) <- colnames(Z_tr)
+
+# Turn into data.frames
+Z_tr_df <- as.data.frame(Z_tr)
+Z_te_df <- as.data.frame(Z_te)
+
+# 3b. Fit primal LDA on Z_tr
+lda_rff <- lda(x = Z_tr_df, grouping = y_sub)
+
+# 3c. In‑sample performance
+pred_tr <- predict(lda_rff, newdata = Z_tr_df)$class
+inTab_rff <- table(Obs=y_sub, Pred=pred_tr)
+cat("RFF‑LDA In‑sample accuracy =", sum(diag(inTab_rff))/sum(inTab_rff), "\n")
+print(inTab_rff)
+
+# Out-of-sample accuracy
+trainedVars <- colnames(Z_tr_df)
+Z_te_df2 <- Z_te_df[, trainedVars, drop = FALSE]
+# sanity check
+stopifnot(identical(colnames(Z_tr_df), colnames(Z_te_df2)))
+stopifnot(nrow(Z_te_df2) == length(y_te))
+
+# 3d. Test performance: map *full* X_te (or its subset) → RFF_te
+pred_te <- predict(lda_rff, newdata=Z_te_df2)$class
+# confusion
+outTab <- table(Obs=y_te, Pred=pred_te)
+cat("Test accuracy:", sum(diag(outTab))/sum(outTab), "\n")
+print(outTab)
+```
+
+
+```{r visualize}
+library(ggplot2)
+
+# 4a. get in‐sample scores
+scores_tr <- predict(lda_rff, newdata=Z_tr_df)$x[,1]
+df_tr     <- data.frame(D1 = scores_tr, Income = y_sub)
+
+ggplot(df_tr, aes(x = D1, fill = Income)) +
+  geom_density(alpha = 0.4) +
+  labs(title="In‑Sample Discriminant Score Distributions",
+       x="LDA Score (D1)", y="Density") +
+  theme_minimal()
+
+# 4b. and on the test set
+scores_te <- predict(lda_rff, newdata=Z_te_df2)$x[,1]
+df_te     <- data.frame(D1 = scores_te, Income = y_te)
+
+ggplot(df_te, aes(x = D1, fill = Income)) +
+  geom_density(alpha = 0.4) +
+  labs(title="Test‑Set Discriminant Score Distributions",
+       x="LDA Score (D1)", y="Density") +
+  theme_minimal()
+
+
+```
+
+
+
+```{r roc&auc}
+library(pROC)
+
+# posterior probability of class “>50K”
+post_te <- predict(lda_rff, newdata=Z_te_df2)$posterior[,">50K"]
+
+roc_obj <- roc(response = y_te, predictor = post_te)
+plot.roc(roc_obj, main = sprintf("ROC curve (AUC = %.3f)", auc(roc_obj)))
+
+```
+
+```{r confusion}
+df_cm <- as.data.frame(outTab)
+colnames(df_cm) <- c("Truth","Pred","Count")
+
+ggplot(df_cm, aes(x=Truth, y=Pred, fill=Count)) +
+  geom_tile() +
+  geom_text(aes(label=Count), color="white") +
+  scale_fill_gradient(low="grey80", high="steelblue") +
+  labs(title="Test Confusion Matrix", x="True Income", y="Predicted Income") +
+  theme_minimal()
+
+```
+
+
+
+

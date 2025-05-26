@@ -1,0 +1,135 @@
+---
+title: "SOC_229_EX_8"
+author: "Phoebe Jiang"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r}
+#─── 1. Libraries ───────────────────────────────────────────────────────────────
+library(kernelTools)
+
+#─── 2. Read & Clean Data ───────────────────────────────────────────────────────
+# (Assumes you have 'adult.data' in your working directory.)
+adult <- read.csv(
+  "adult.csv",
+  header      = FALSE,
+  sep         = ",",
+  strip.white = TRUE,
+  na.strings  = "?"
+)
+names(adult) <- c(
+  "age","workclass","fnlwgt","education","education_num",
+  "marital_status","occupation","relationship","race","sex",
+  "capital_gain","capital_loss","hours_per_week","native_country","income"
+)
+adult <- na.omit(adult)
+adult$income <- factor(adult$income, levels = c("<=50K", ">50K"))
+
+#─── 3. Define Predictors & Outcome ─────────────────────────────────────────────
+# Select numeric + categorical predictors
+predictors <- c(
+  "age","education_num","hours_per_week","capital_gain","capital_loss",
+  "workclass","marital_status","occupation","relationship","race","sex"
+)
+# Create design matrix (one‐hot for factors)
+X <- model.matrix(~ . - 1, data = adult[, predictors])
+# Binary outcome: TRUE if >50K
+y <- adult$income == ">50K"
+```
+
+```{r}
+#─── 4. Train/Test Split ────────────────────────────────────────────────────────
+set.seed(1331)
+n         <- nrow(X)
+train_idx <- sample.int(n, size = 0.8 * n)
+X_train   <- X[train_idx, ]
+X_test    <- X[-train_idx, ]
+y_train   <- y[train_idx]
+y_test    <- y[-train_idx]
+```
+
+```{r}
+# ─── 5a. Sub‑sample for tuning ─────────────────────────────────────────────────
+set.seed(1331)
+n_small   <- 2000
+small_idx <- sample(seq_len(nrow(X_train)), size = n_small)
+X_sub     <- X_train[small_idx, ]
+y_sub     <- y_train[small_idx]
+
+# ─── 5b. Hyperparameter Tuning on subset ──────────────────────────────────────
+tune_small <- kernSVMBW(
+  y          = y_sub,
+  x          = X_sub,
+  kernel     = "rbf",
+  kern.param = list(gamma   = 10^seq(-3, 1, by = 1)),
+  reg.param  = 10^(-3:3),
+  reps       = 1,
+  verbose    = FALSE
+)
+
+best_gamma  <- tune_small$best.kernpar
+best_lambda <- tune_small$best.regpar
+```
+
+```{r}
+
+#─── 6. Fit Final kSVM ──────────────────────────────────────────────────────────
+fit <- kernSVM(
+  y          = y_sub,
+  x          = X_sub,
+  kernel     = "rbf",
+  kern.param = best_gamma,
+  reg.param  = best_lambda,
+)
+```
+
+```{r}
+
+#─── 7. In‑Sample Performance ───────────────────────────────────────────────────
+cat("\nIn‑sample confusion matrix:\n")
+print(fit$confusion)
+train_acc <- sum(diag(fit$confusion)) / sum(fit$confusion)
+cat("Training accuracy:", round(train_acc, 3), "\n")
+```
+
+```{r}
+#─── 8. Out‑of‑Sample Performance ───────────────────────────────────────────────
+pred_test_label <- predict(fit, X_test, type = "label")
+conf_test <- table(
+  Actual    = y_test,
+  Predicted = pred_test_label
+)
+cat("\nTest confusion matrix:\n")
+print(conf_test)
+test_acc <- sum(diag(conf_test)) / sum(conf_test)
+cat("Test accuracy:", round(test_acc, 3), "\n")
+```
+
+```{r}
+#─── 9. Cross‑Validated Accuracy ────────────────────────────────────────────────
+eval <- kernSVMCV(
+  y          = y_sub,
+  x          = X_sub,
+  kernel     = "rbf",
+  kern.param = best_gamma,
+  reg.param  = best_lambda,
+  verbose    = FALSE
+)
+cv_acc <- eval$mean.vals["Acc"]
+cat("\nCross‑validated accuracy:", round(cv_acc, 3), "\n")
+```
+
+```{r}
+#─── 10. Feature Correlations with Decision Values ──────────────────────────────
+decision_vals <- fit$y.pred  # raw in‑sample decision function
+cors <- apply(X_sub, 2, function(col) cor(col, decision_vals))
+top10 <- sort(cors, decreasing = TRUE)[1:10]
+cat("\nTop 10 features by correlation with decision function:\n")
+print(top10)
+
+```
+
+
+

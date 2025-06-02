@@ -1,0 +1,433 @@
+---
+title: "SOC_229_EX_9"
+author: "Phoebe Jiang"
+date: "2025-05-28"
+output: html_document
+---
+
+
+```{r data}
+# Read and preprocess
+df <- read.csv("housing.csv", stringsAsFactors = TRUE)
+
+# Response: log of median house value
+y_raw <- df$median_house_value
+y     <- log(y_raw)
+
+# Numeric predictors
+num_vars <- c("longitude","latitude","housing_median_age",
+              "total_rooms","total_bedrooms","population",
+              "households","median_income")
+X_num    <- as.matrix(df[num_vars])
+
+# One‑hot encode ocean_proximity
+X_cat    <- model.matrix(~ ocean_proximity - 1, data = df)
+
+# Final design matrix
+x <- cbind(X_num, X_cat)
+
+# Quick head check
+head(x)
+head(y)
+
+```
+
+
+```{r kernLSRF}
+library(kernelTools)
+library(MASS) 
+
+# 1. Impute NAs in total_bedrooms with column median
+x[ is.na(x[,"total_bedrooms"]), "total_bedrooms" ] <-
+  median(x[,"total_bedrooms"], na.rm=TRUE)
+
+# 2. Verify no more NAs
+colSums(is.na(x))
+
+
+#––– Split into train/test –––
+set.seed(1331)
+n         <- nrow(x)
+val_idx   <- sample(n, size = round(0.2*n))
+train_idx <- setdiff(seq_len(n), val_idx)
+
+#––– kernLSRF on housing data –––
+fit0 <- kernLSRF(
+  y         = y, 
+  x         = x,
+  sel.train = train_idx, 
+  sel.test  = val_idx,
+  order     = 1,          
+  features  = 1000
+)
+print(data.frame(
+  R2_train = fit0$R2.train,
+  R2_test  = fit0$R2.test
+))
+```
+
+
+```{r kernWLS}
+# train‐only data
+Xtr <- x[train_idx,,drop=FALSE]
+nrm <- sqrt(rowSums(Xtr^2))
+# raw cosine
+R   <- tcrossprod(Xtr, Xtr) / (nrm %o% nrm + 1e-10)
+# clip into [–1, 1]
+R   <- pmax(-1, pmin(1, R))
+# Plug into the arc‑cosine formula (order = 1)
+θ     <- acos(R)
+Ktr   <- (1/pi) * ( sin(θ) + (pi - θ)*cos(θ) ) * (nrm %o% nrm)
+
+# pick a (small) L2 penalty
+lambda <- 1e-3
+
+# solve for dual weights
+alpha <- solve(Ktr + lambda * diag(nrow(Ktr)), y[train_idx])
+
+# build test Gram matrix
+Xte   <- x[val_idx, , drop=FALSE]
+nrmt  <- sqrt(rowSums(Xte^2))
+R_te  <- tcrossprod(Xte, Xtr) / (nrmt %o% nrm + 1e-10)
+R_te  <- pmax(-1, pmin(1, R_te))
+θ_te  <- acos(R_te)
+K_te  <- (1/pi)*( sin(θ_te) + (pi - θ_te)*cos(θ_te) ) * (nrmt %o% nrm)
+
+# predict and compare
+yhat_rf <- fit0$yhat.test
+yhat_exact <- K_te %*% alpha
+cor(yhat_exact, yhat_rf)
+```
+
+```{r vary-features}
+
+feature_counts <- c(100, 500, 1000, 2000)
+corrs <- numeric(length(feature_counts))
+
+for (i in seq_along(feature_counts)) {
+  ff <- feature_counts[i]
+  fit_rf <- kernLSRF(
+    y         = y, x        = x,
+    sel.train = train_idx, sel.test = val_idx,
+    order     = 1,        # keep order=1 
+    features  = ff
+  )
+  yhat_rf       <- fit_rf$yhat.test
+  corrs[i]      <- cor(yhat_exact, yhat_rf)
+}
+
+feature_df <- data.frame(
+  features    = feature_counts,
+  correlation = corrs
+)
+print(feature_df)
+
+# plot convergence
+plot(feature_df$features, feature_df$correlation, type = "b",
+     xlab = "Number of Random Features",
+     ylab = "corr(exact, RF)", main = "RF → Exact Correlation")
+
+```
+
+
+```{r vary-orders}
+# choose a fixed feature count (e.g. 1000)
+features_fixed <- 1000
+
+orders <- 0:3
+r2_train <- numeric(length(orders))
+r2_test  <- numeric(length(orders))
+
+for (j in seq_along(orders)) {
+  ord <- orders[j]
+  fit_ord <- kernLSRF(
+    y         = y, x        = x,
+    sel.train = train_idx, sel.test = val_idx,
+    order     = ord,
+    features  = features_fixed
+  )
+  r2_train[j] <- fit_ord$R2.train
+  r2_test[j]  <- fit_ord$R2.test
+}
+
+order_df <- data.frame(
+  order    = orders,
+  R2_train = r2_train,
+  R2_test  = r2_test
+)
+print(order_df)
+
+# visualize
+matplot(
+  orders, cbind(r2_train, r2_test), type = "b", pch = 19,
+  xlab = "Kernel Order", ylab = expression(R^2),
+  main = paste("Effect of Kernel Order (features=", features_fixed,")"),
+  col  = c("black","red")
+)
+legend("bottomright", legend = c("Train","Test"), col = c("black","red"), pch = 19)
+
+```
+
+```{r fixed-order2}
+fit_ord2 <- kernLSRF(
+  y         = y, x        = x,
+  sel.train = train_idx, sel.test = val_idx,
+  order     = 2,
+  features  = 1000,
+  L2.grid   = 10^seq(-6, 6, length = 25),  # ← much broader
+  ensure.bias = TRUE                       # explicitly force an intercept
+)
+print(fit_ord2$R2.train); print(fit_ord2$R2.test)
+
+```
+
+
+```{r fixed-order3}
+fit_ord3 <- kernLSRF(
+  y           = y, x         = x,
+  sel.train   = train_idx, sel.test = val_idx,
+  order       = 3,
+  features    = 1000,
+  L2.grid     = 10^seq(-6,6,length=25),
+  ensure.bias = TRUE
+)
+data.frame(
+  order    = 3,
+  R2_train = fit_ord3$R2.train,
+  R2_test  = fit_ord3$R2.test
+)
+
+```
+
+```{r}
+#––– 1) Common settings
+features_fixed <- 1000
+L2g            <- 10^seq(-6, 6, length=25)
+
+#––– 2) Fit orders 0–2 
+fit_ord0 <- kernLSRF(
+  y           = y, x         = x,
+  sel.train   = train_idx, sel.test = val_idx,
+  order       = 0,
+  features    = features_fixed,
+  ensure.bias = TRUE
+)
+fit_ord1 <- kernLSRF(
+  y           = y, x         = x,
+  sel.train   = train_idx, sel.test = val_idx,
+  order       = 1,
+  features    = features_fixed,
+  ensure.bias = TRUE
+)
+fit_ord2 <- kernLSRF(
+  y         = y, x        = x,
+  sel.train = train_idx, sel.test = val_idx,
+  order     = 2,
+  features  = 1000,
+  L2.grid   = 10^seq(-6, 6, length = 25),  
+  ensure.bias = TRUE                      
+)
+
+#––– 3) Fit order 3 *with* PCA‑prune
+fit_ord3p <- kernLSRF(
+  y           = y, x         = x,
+  sel.train   = train_idx, sel.test = val_idx,
+  order       = 3,
+  features    = features_fixed,
+  L2.grid     = L2g,
+  pca.prune   = 0.99,       # keep 99% variance in RF space
+  ensure.bias = TRUE
+)
+
+#––– 4) Summarize in one table
+fits   <- list(fit_ord0, fit_ord1, fit_ord2, fit_ord3p)
+orders <- c(0, 1, 2, 3)
+res    <- data.frame(
+  order    = orders,
+  R2_train = sapply(fits, function(f) f$R2.train),
+  R2_test  = sapply(fits, function(f) f$R2.test)
+)
+print(res)
+
+#––– 5) Visualize
+matplot(
+  res$order, res[,2:3], type="b", pch=19,
+  xlab="Kernel order", ylab=expression(R^2),
+  main=paste("kernLSRF performance by order (", features_fixed, " RF)", sep="")
+)
+legend("bottomright", legend=c("Train","Test"), pch=19, col=1:2)
+
+```
+
+```{r}
+# common settings
+features <- 1000
+L2g      <- 10^seq(-8, 8, length = 25)
+
+# order 2 with stronger reg + pruning
+fit2b <- kernLSRF(
+  y           = y, x         = x,
+  sel.train   = train_idx, sel.test = val_idx,
+  order       = 2,
+  features    = features,
+  L2.grid     = L2g,
+  pca.prune   = 0.90,     # keep only 90% of variance
+  ensure.bias = TRUE
+)
+
+# order 3 with even stronger reg + pruning
+fit3b <- kernLSRF(
+  y           = y, x         = x,
+  sel.train   = train_idx, sel.test = val_idx,
+  order       = 3,
+  features    = features,
+  L2.grid     = L2g,
+  pca.prune   = 0.90,
+  ensure.bias = TRUE
+)
+
+# gather all four
+fits2 <- list(fit_ord0, fit_ord1, fit2b, fit3b)
+orders2 <- c(0, 1, 2, 3)
+res2 <- data.frame(
+  order    = orders2,
+  R2_train = sapply(fits2, function(f) f$R2.train),
+  R2_test  = sapply(fits2, function(f) f$R2.test)
+)
+print(res2)
+
+```
+
+```{r}
+# a) Fewer features + stronger pruning
+fit3a <- kernLSRF(
+  y           = y, x         = x,
+  sel.train   = train_idx, sel.test = val_idx,
+  order       = 3,
+  features    = 500,                # cut in half
+  L2.grid     = 10^seq(-10,10,25),  # even wider
+  pca.prune   = 0.80,               # keep only 80% variance
+  ensure.bias = TRUE
+)
+
+# b) Or, keep features=1000 but prune more & enlarge L2
+fit3b <- kernLSRF(
+  y           = y, x         = x,
+  sel.train   = train_idx, sel.test = val_idx,
+  order       = 3,
+  features    = 1000,
+  L2.grid     = 10^seq(-10,10,25),
+  pca.prune   = 0.70,               # keep only 70% variance
+  ensure.bias = TRUE
+)
+
+data.frame(
+  model = c("3a (500F, p=0.80)","3b (1000F, p=0.70)"),
+  R2_train = c(fit3a$R2.train, fit3b$R2.train),
+  R2_test  = c(fit3a$R2.test,  fit3b$R2.test)
+)
+
+```
+
+
+
+```{r Unsupervised}
+library(kernelTools)
+library(WDI)
+
+#––– 1) Define the ten WDI indicator codes
+inds <- c(
+  gdpPercap  = "NY.GDP.PCAP.CD",   # GDP per capita (current US$)
+  lifeExp    = "SP.DYN.LE00.IN",   # Life expectancy at birth
+  literacy   = "SE.ADT.LITR.ZS",   # Adult literacy rate (%)
+  internet   = "IT.NET.USER.ZS",   # Internet users (% pop)
+  school     = "SE.SEC.ENRR",      # Secondary school enrollment (%)
+  urbanPop   = "SP.URB.TOTL.IN.ZS",# Urban population (%)
+  infantMort = "SP.DYN.IMRT.IN",   # Infant mortality rate
+  pdensity   = "EN.POP.DNST",      # Population density (people/km²)
+  healthExp  = "SH.XPD.CHEX.GD.ZS",# Health exp. (% GDP)
+  poverty    = "SI.POV.DDAY"       # Poverty headcount ratio (%)
+)
+
+#––– 2) Fetch 2020 data
+gdi_raw <- WDI(
+  country  = "all",
+  indicator= inds,
+  start    = 2020, end = 2020,
+  extra    = FALSE,
+  cache    = NULL
+)
+
+#––– 3) Clean & reshape
+# drop aggregates (regions), keep only countries with no missing in these ten
+gdi <- na.omit(gdi_raw[, c("country", names(inds))])
+
+#––– 4) Prepare matrix for kernel analysis
+countries <- gdi$country
+X_unsup   <- scale(as.matrix(gdi[,-1]))    # center+scale
+
+#––– 5) RF MDS (order=1, 500 features)
+set.seed(1331)
+rf_mat <- genACRF(x = X_unsup, order = 1, features = 500)
+d_rf   <- dist(rf_mat)                   
+mds_rf <- cmdscale(d_rf, k = 2)
+
+# Manual “exact” MDS via Gram → distances → cmdscale
+#––– A) Build the arc‑cosine Gram matrix (order = 1)
+n       <- nrow(X_unsup)
+nrmU    <- sqrt(rowSums(X_unsup^2))                      # ‖x_i‖ for each country
+
+# 1) Build raw cosine‐similarity “matrix” R_U_raw
+num   <- tcrossprod(X_unsup, X_unsup)       
+denom <- (nrmU %o% nrmU) + 1e-10            
+R_U   <- num / denom                        
+
+# 2) Clip in place, preserving the matrix dims
+R_U[R_U < -1] <- -1
+R_U[R_U >  1] <-  1
+
+θ_U   <- acos(R_U)                         # θ_{ij} = arccos(cos(x_i, x_j))
+
+# Arc‑cosine(1) formula: K_{ij} = (1/π)[ sin(θ) + (π−θ) cos(θ) ]·‖x_i‖‖x_j‖
+K_U   <- (1/pi) * ( sin(θ_U) + (pi - θ_U)*cos(θ_U) ) * (nrmU %o% nrmU)
+
+# Convert Gram -> squared distances D2_mat
+diagK  <- diag(K_U)                        # K_{ii}, length 13
+# Outer sums K_{ii} + K_{jj} minus 2 K_{ij}
+D2_mat <- outer(diagK, diagK, "+") - 2 * K_U
+
+# Clip negative entries in place, preserving dimensions
+D2_mat[D2_mat < 0] <- 0
+
+# Take square‐root → Euclidean distance matrix D_mat
+D_mat   <- sqrt(D2_mat)
+
+# Run cmdscale on D_mat
+mds_ex2 <- cmdscale(as.dist(D_mat), k = 2)  # 13 × 2 embedding
+
+#––– 3) Plot RF vs. Exact‐Kernel MDS side‐by‐side –––
+# Because N=13, labeling all points is still legible.
+# Use identical x/y limits so shapes are directly comparable.
+all_x <- c(mds_rf[,1], mds_ex2[,1])
+all_y <- c(mds_rf[,2], mds_ex2[,2])
+xrange <- range(all_x, finite = TRUE)
+yrange <- range(all_y, finite = TRUE)
+
+par(mfrow = c(1, 2), mar = c(4, 4, 2, 1))
+
+# (a) RF‐based MDS
+plot(mds_rf, pch = 19, cex = 1.0,
+     xlim = xrange, ylim = yrange,
+     main = "MDS on 500 RF (order 1)",
+     xlab = "Dim 1", ylab = "Dim 2")
+text(mds_rf, labels = countries, cex = 0.8, pos = 3)
+
+# (b) Exact‐kernel MDS
+plot(mds_ex2, pch = 19, cex = 1.0,
+     xlim = xrange, ylim = yrange,
+     main = "Exact ArcCosine MDS (order 1)",
+     xlab = "Dim 1", ylab = "Dim 2")
+text(mds_ex2, labels = countries, cex = 0.8, pos = 3)
+```
+
+

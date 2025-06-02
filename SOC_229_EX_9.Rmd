@@ -259,7 +259,7 @@ legend("bottomright", legend=c("Train","Test"), pch=19, col=1:2)
 
 ```
 
-```{r}
+```{r final}
 # common settings
 features <- 1000
 L2g      <- 10^seq(-8, 8, length = 25)

@@ -1,0 +1,361 @@
+---
+title: "Mini_2"
+author: "Phoebe Jiang"
+date: "2025-05-19"
+output: html_document
+---
+
+
+
+```{r data}
+# Load Fashion-MNIST RData
+load("C:/Users/saran/OneDrive/Documents/SOC 229/MNIST_fashion.RData")
+
+# Inspect structure
+str(mnist)
+
+# Extract train/test arrays
+X_train_raw <- mnist$train$x   # 28×28×60000
+train_labels  <- mnist$train$y
+X_test_raw  <- mnist$test$x    # 28×28×10000
+test_labels   <- mnist$test$y
+
+# Flatten images to 784 vectors
+flatten <- function(img) as.numeric(img)
+# Flatten each image i = 1..n along the first margin:
+X_train <- t(apply(X_train_raw, 1, flatten)) # -> 60000 × 784
+X_test  <- t(apply(X_test_raw,  1, flatten)) # -> 60000 × 784
+
+# Standardize by training mean/sd
+mu <- colMeans(X_train)     # length 784
+sg <- apply(X_train, 2, sd) # length 784
+X_train <- scale(X_train, center = mu, scale = sg)
+X_test  <- scale(X_test,  center = mu, scale = sg)
+```
+
+```{r lda}
+# Baseline: Linear Discriminant Analysis
+library(MASS)
+lda_fit <- lda(x = X_train, grouping = train_labels)
+pred    <- predict(lda_fit, X_test)$class
+acc     <- mean(pred == test_labels)
+cat("LDA test accuracy:", round(acc*100,2), "%\n")
+
+# Confusion table
+table(Predicted = pred, True = test_labels)
+```
+
+```{r}
+library(kernelTools)
+library(caret)
+set.seed(123)
+
+# 1. Subsample 5000 training and 5000 test points
+n_small <- 5000
+
+train_idx_small <- createDataPartition(train_labels, p = 5000/length(train_labels), list = FALSE)
+test_idx_small  <- createDataPartition(test_labels,  p = 5000/length(test_labels),  list = FALSE)
+
+
+X_train_sm <- X_train[train_idx_small, ]
+y_train_sm <- train_labels[train_idx_small]
+X_test_sm  <- X_test[test_idx_small, ]
+y_test_sm  <- test_labels[test_idx_small]
+```
+
+
+
+
+```{r tune kfda}
+library(kernelTools)
+
+set.seed(45)
+
+# 2. Define the same tuning grids
+reg_params <- 10^seq(-3, 1, by = 1)
+sigma_grid <- 10^seq(-3, 1, by = 1)
+
+# 3. Tune kFDA on the small sample
+tune_rbf_sm <- kernWLSBW(
+  x          = list(X_train_sm),
+  y          = y_train_sm,
+  k          = 5, reps = 1,
+  kernel     = "rbf",
+  reg.param  = reg_params,
+  kern.param = list(sigma = sigma_grid)
+)
+best_lambda <- tune_rbf_sm$best.regpar
+best_sigma  <- tune_rbf_sm$best.kernpar["sigma"]
+cat("Tuned on 5k sample → λ =", best_lambda, "; σ =", best_sigma, "\n")
+```
+
+```{r re-fit and predict}
+# 1. Median‐heuristic σ on 2,000 random points
+set.seed(123)
+sub_idx  <- sample(nrow(X_train_sm), 2000)
+d_mat    <- dist(X_train_sm[sub_idx, ])      # 2000×2000 pairwise distances
+sigma0   <- median(d_mat)
+cat("Median‐heuristic σ:", round(sigma0,4), "\n")
+
+# 2. Re‐fit kFDA on the 5k sample with σ = sigma0 and best_lambda
+kfda_fixed <- kernWLS(
+  x         = list(X_train_sm),
+  y         = y_train_sm,
+  kernel    = "rbf",
+  reg.param = best_lambda,
+  kern.param= list(sigma = sigma0)
+)
+
+# 3. Predict & evaluate on the 5k test subset
+pred_fixed <- predict(kfda_fixed, newdata = list(X_test_sm))
+```
+
+
+```{r evaluate}
+# Discretize the numeric kFDA outputs
+pred_class <- round(pred_fixed)
+
+# Compute discrete accuracy
+acc_class <- mean(pred_class == y_test_sm)
+cat("Discrete kFDA test accuracy on 5k sample:", round(acc_class*100,2), "%\n")
+
+# Confusion matrix
+table(Predicted = pred_class, True = y_test_sm)
+
+```
+
+```{r}
+# 1. Class‑by‑class precision & recall (on 5k sample)
+preds_full <- factor(pred_class, levels = 0:9)
+trues_full <- factor(y_test_sm,   levels = 0:9)
+conf_full  <- table(Predicted = preds_full, True = trues_full)
+
+precision <- diag(conf_full) / rowSums(conf_full)
+recall    <- diag(conf_full) / colSums(conf_full)
+
+pr_df <- data.frame(
+  Class     = 0:9,
+  Precision = round(precision, 3),
+  Recall    = round(recall,    3)
+)
+print(pr_df)
+```
+
+```{r}
+library(kernlab)
+# 2. Boxplot of the kFDA discriminant score by class
+#    (the continuous output from kFDA, before rounding)
+cont_score <- predict(kfda_fixed, newdata = list(X_test_sm))
+df_box <- data.frame(
+  Score = cont_score,
+  Label = factor(y_test_sm)
+)
+
+library(ggplot2)
+ggplot(df_box, aes(x = Label, y = Score)) +
+  geom_boxplot(outlier.size = 0.5) +
+  labs(
+    title = "Distribution of kFDA Discriminant Scores by True Class",
+    x = "True Class",
+    y = "kFDA Score"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# 3. 2‑D Kernel PCA embedding for visualization
+library(kernlab)
+
+# Use the same σ from median‐heuristic
+rbf_par <- list(sigma = 1/(2*sigma0^2))
+
+# Fit KPCA on the small training set, extracting 2 components
+kpca_fit <- kpca(
+  ~., data = as.data.frame(X_train_sm),
+  kernel   = "rbfdot",
+  kpar     = rbf_par,
+  features = 2
+)
+
+# Project the test set
+test_kpca <- predict(kpca_fit, as.data.frame(X_test_sm))
+proj_df <- data.frame(
+  PC1   = test_kpca[,1],
+  PC2   = test_kpca[,2],
+  Label = factor(y_test_sm)
+)
+
+# Scatterplot of the two kernel PCs
+ggplot(proj_df, aes(x = PC1, y = PC2, color = Label)) +
+  geom_point(alpha = 0.6, size = 1) +
+  labs(
+    title = "Kernel PCA (RBF) 2‑D Embedding of Test Images",
+    x = "Kernel PC 1",
+    y = "Kernel PC 2"
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r kcca}
+library(OpenImageR)
+library(kernlab)
+library(ggplot2)
+
+# 1. Compute HOG features for our 5k subsample
+hog_params <- list(cells = 4, orientations = 9)  
+
+hog_train <- t(sapply(1:nrow(X_train_sm), function(i) {
+  img <- matrix(X_train_sm[i, ], 28, 28, byrow = TRUE)
+  HOG(img, cells = hog_params$cells, orientations = hog_params$orientations)
+}))
+hog_test <- t(sapply(1:nrow(X_test_sm), function(i) {
+  img <- matrix(X_test_sm[i, ], 28, 28, byrow = TRUE)
+  HOG(img, cells = hog_params$cells, orientations = hog_params$orientations)
+}))
+
+# 2. Median‐heuristic σ’s for each view
+sigma_pixel <- median(dist(X_train_sm))
+sigma_hog   <- median(dist(hog_train))
+cat("σ_pixel =", round(sigma_pixel,2), "   σ_hog =", round(sigma_hog,2), "\n")
+```
+
+# --- Nyström kFDA pipeline --- 
+
+```{r Nyström}
+# 0. Load required packages
+library(kernlab)      # for rbfdot, kernelMatrix, kcca, etc.
+library(kernelTools)  # for kernWLSBW, kernWLS
+library(ggplot2)      # for visualization
+
+
+# --- 1. Subsample 5k points (with set.seed for reproducibility) ---
+set.seed(123)
+n_small        <- 5000
+train_idx_sm   <- sample(nrow(X_train), n_small)
+test_idx_sm    <- sample(nrow(X_test),  n_small)
+X_train_sm     <- X_train[train_idx_sm, ]
+y_train_sm     <- train_labels[train_idx_sm]
+X_test_sm      <- X_test[test_idx_sm, ]
+y_test_sm      <- test_labels[test_idx_sm]
+
+# --- 2. Nyström landmarks & RBF kernel setup ---
+m         <- 500
+land_idx  <- sample(nrow(X_train_sm), m)
+X_land    <- X_train_sm[land_idx, ]
+
+# Median‐heuristic bandwidth
+sigma_nys <- median(dist(X_train_sm))
+rbf_kern  <- rbfdot(sigma = 1/(2 * sigma_nys^2))
+
+# --- 3. Compute Nyström pieces ---
+K_mm   <- kernelMatrix(rbf_kern, X_land)               # m×m
+K_nm   <- kernelMatrix(rbf_kern, X_train_sm, X_land)   # n×m
+K_testm<- kernelMatrix(rbf_kern, X_test_sm,  X_land)   # n_test×m
+
+# Add tiny ridge for invertibility
+ridge   <- 1e-6
+K_mm_r  <- K_mm + diag(ridge, m)
+
+# Inverse & embed
+Kmm_inv <- solve(K_mm_r)                               # m×m
+# Build explicit Nyström features: Z = K_nm %*% U %*% D^{-1/2}
+eig     <- eigen(K_mm_r, symmetric=TRUE)
+U       <- eig$vectors   # m×m
+D       <- eig$values
+D_inv_s <- diag(1/sqrt(D))
+Z_train <- K_nm %*% U %*% D_inv_s                      # n×m
+Z_test  <- K_testm %*% U %*% D_inv_s                   # n_test×m
+
+# --- 4. Tune kFDA via kernWLSBW on Z_train with linear kernel ---
+reg_params <- 10^seq(-3, 1, by = 1)
+tune_nys <- kernWLSBW(
+  x         = list(Z_train),
+  y         = y_train_sm,
+  kernel    = "linear",
+  reg.param = reg_params,
+  k         = 5,
+  reps      = 1
+)
+best_lambda <- tune_nys$best.regpar
+cat("Tuned λ (Nyström):", best_lambda, "\n")
+```
+
+
+```{r}
+# --- 5. Final kFDA fit on Z_train ---
+kfda_nys <- kernWLS(
+  x         = list(Z_train),
+  y         = y_train_sm,
+  kernel    = "linear",
+  reg.param = best_lambda
+)
+
+# --- 6. Predict on Z_test and evaluate ---
+pred_cont_nys  <- predict(kfda_nys, newdata = list(Z_test))
+pred_class_nys <- round(pred_cont_nys)
+acc_nys        <- mean(pred_class_nys == y_test_sm)
+cat("Nyström kFDA test accuracy:", round(acc_nys*100,2), "%\n")
+
+conf_nys <- table(Predicted = pred_class_nys, True = y_test_sm)
+print(conf_nys)
+
+# --- 7. Visualize discriminant scores by class ---
+df_nys <- data.frame(
+  Score = pred_cont_nys,
+  Label = factor(y_test_sm)
+)
+
+ggplot(df_nys, aes(x = Label, y = Score)) +
+  geom_boxplot(outlier.size = 0.5) +
+  labs(
+    title = "Nyström kFDA Discriminant Scores by Class",
+    x     = "True Class",
+    y     = "kFDA Score"
+  ) +
+  theme_minimal()
+
+```
+
+```{r refinements}
+# --- 1. Nearest‑Centroid Classifier on Nyström Features ---
+
+# Compute class centroids in Z‑space
+classes        <- sort(unique(y_train_sm))
+centroids_mat  <- do.call(rbind, lapply(classes, function(cl) {
+  colMeans(Z_train[y_train_sm == cl, , drop=FALSE])
+}))
+rownames(centroids_mat) <- classes
+
+# Assign each test point to the nearest centroid
+pred_centroid <- apply(Z_test, 1, function(x) {
+  dists <- rowSums((centroids_mat - x)^2)
+  classes[which.min(dists)]
+})
+acc_centroid <- mean(pred_centroid == y_test_sm)
+cat("Nearest‑Centroid accuracy:", round(acc_centroid*100,2), "%\n")
+print(table(Predicted = pred_centroid, True = y_test_sm))
+
+
+# --- 2. Multiclass SVM on Nyström Features ---
+
+library(kernlab)
+svm_fit <- ksvm(
+  x      = Z_train,
+  y      = factor(y_train_sm),
+  type   = "C-svc",
+  kernel = "rbfdot",
+  kpar   = list(sigma = 1/(2 * sigma_nys^2)),
+  C      = 1
+)
+
+pred_svm <- predict(svm_fit, Z_test)
+acc_svm  <- mean(pred_svm == y_test_sm)
+cat("SVM accuracy:", round(acc_svm*100,2), "%\n")
+print(table(Predicted = pred_svm, True = y_test_sm))
+
+```
+
+
+
